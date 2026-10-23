@@ -1,5 +1,23 @@
 import Foundation
 
+/// File-provider metadata is unreliable. Validate bytes instead of trusting a UTI or extension.
+public enum WorkflowImportData {
+    public static func normalized(_ data: Data) throws -> Data {
+        guard !data.isEmpty else { throw WorkflowError.invalid("文件为空。若来自 iCloud，请先在“文件”App 中完成下载。") }
+        guard data.count <= 12_000_000 else { throw WorkflowError.invalid("工作流超过 12 MB，请导出不含预览图片的 JSON。") }
+        var result = data
+        if data.starts(with: [0xEF, 0xBB, 0xBF]) { result = data.dropFirst(3) }
+        else if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]) {
+            guard let text = String(data: data, encoding: .utf16) else { throw WorkflowError.invalid("无法读取文件的文字编码。") }
+            result = Data(text.utf8)
+        }
+        guard (try? JSONValue(data: result).objectValue) != nil else {
+            throw WorkflowError.invalid("所选文件不是有效的 JSON 工作流。请从 ComfyUI 导出 JSON；若是网页或压缩包，请先下载或解压原文件。")
+        }
+        return result
+    }
+}
+
 public enum WorkflowError: LocalizedError, Equatable {
     case invalid(String)
     public var errorDescription: String? { if case .invalid(let message) = self { return message }; return nil }

@@ -6,6 +6,20 @@ final class WorkflowCoreTests: XCTestCase {
     private func bytes(_ value: String) -> Data { Data(value.utf8) }
     private let sample = #"{"1":{"class_type":"PrimitiveInt","inputs":{"value":1024},"_meta":{"title":"custom"},"custom":{"enabled":true}},"2":{"class_type":"KSampler","inputs":{"seed":18446744073709551615,"steps":20,"cfg":7.5,"enabled":true,"model":["1",0],"literal":["red",0],"extra":{"keep":[1,true,null]}}}}"#
 
+    func testImportReadsBOMAndUTF16WithoutLosingLargeSeeds() throws {
+        let bom = Data([0xEF, 0xBB, 0xBF]) + bytes(sample)
+        for data in [bom, try XCTUnwrap(sample.data(using: .utf16))] {
+            let normalized = try WorkflowImportData.normalized(data)
+            let document = try WorkflowDocument(data: normalized)
+            XCTAssertEqual(document.prompt["2"]?["inputs"]?["seed"]?.uint64Value, UInt64.max)
+        }
+    }
+    func testImportRejectsEmptyHTMLArraysAndOversizedFiles() {
+        for data in [Data(), bytes("<html>download</html>"), bytes("[]"), Data(repeating: 32, count: 12_000_001)] {
+            XCTAssertThrowsError(try WorkflowImportData.normalized(data))
+        }
+    }
+
     func testRoundTripPreservesUnknownValuesAndUInt64() throws {
         let original = try JSONValue(data: bytes(sample))
         let document = try WorkflowDocument(data: bytes(sample))

@@ -9,6 +9,16 @@ struct WorkbenchView: View {
         ZStack {
             ArtworkBackground(image: store.background)
             VStack(spacing: 0) {
+                if let config = store.verificationRequired, !clean {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("需要网页验证").font(.subheadline.weight(.semibold))
+                            Text("验证后自动重新连接").font(.caption).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("去验证") { store.beginVerification(config: config) }.frame(minHeight: 44).disabled(store.busy)
+                    }.padding(14).glass(20).padding(.horizontal, 18).padding(.top, 8)
+                }
                 Group {
                     switch store.activeTab {
                     case 0: ChatView(clean: $clean)
@@ -33,6 +43,9 @@ struct WorkbenchView: View {
             Button("知道了", role: .cancel) { store.error = nil }
         } message: { Text(store.error ?? "") }
         .onChange(of: store.activeTab) { _ in clean = false }
+        .sheet(item: $store.verificationPage, onDismiss: { Task { await store.finishVerification() } }) { page in
+            VerificationBrowser(url: page.url) { store.verificationPage = nil }.ignoresSafeArea()
+        }
     }
     private func tab(_ index: Int, _ title: String, _ icon: String) -> some View {
         Button { store.activeTab = index } label: {
@@ -173,9 +186,18 @@ struct ConnectionPage: View {
                 }.padding(20).glass()
                 Text("填写手机可以访问的 ComfyUI 地址。保存前会读取节点定义，为模型列表和参数范围提供依据。").font(.subheadline).foregroundColor(.secondary)
                 Text("离开 App 后，已提交的任务继续在服务器上运行。回到 App 会重新查询队列与结果。").font(.subheadline).foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("外网访问 · DDNSTO", systemImage: "globe").font(.headline)
+                    Text("在上方填写你的 HTTPS 域名。需要登录验证时，打开网页完成验证，再点“完成”返回。").font(.subheadline).foregroundColor(.secondary)
+                    Button {
+                        store.beginVerification(config: ServerConfig(baseURL: address, username: username, passwordKey: key), password: password)
+                    } label: { Label("打开网页验证", systemImage: "arrow.up.forward.app").frame(maxWidth: .infinity, minHeight: 44) }
+                    .buttonStyle(.bordered).disabled(store.busy || address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Text("返回后只检查连接和查询任务。更换网络后可能需要再次验证；网页和 App 应使用相同网络出口。").font(.caption).foregroundColor(.secondary)
+                }.padding(20).glass()
                 Divider()
                 Text("Comfy Workbench for iOS").font(.headline)
-                Text("iOS 15.0+ · 原生 SwiftUI\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
+                Text("0.2.0 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
             }.padding(24)
         }.onAppear {
             if let config = store.server { address = config.baseURL; username = config.username; key = config.passwordKey; password = (try? KeychainStore.password(for: key)) ?? "" }

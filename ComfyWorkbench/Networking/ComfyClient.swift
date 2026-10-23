@@ -35,6 +35,23 @@ public struct ServerConfig: Codable, Equatable, Sendable {
         guard let host = URLComponents(string: baseURL)?.host?.lowercased() else { return false }
         return host == "localhost" || host.hasSuffix(".localhost") || host == "::1" || host == "[::1]" || host.hasPrefix("127.")
     }
+
+    public var isDDNSTO: Bool {
+        guard let host = URLComponents(string: baseURL.trimmingCharacters(in: .whitespacesAndNewlines))?.host?.lowercased() else { return false }
+        return host == "ddnsto.com" || host.hasSuffix(".ddnsto.com")
+    }
+}
+
+public struct ServerWorkflow: Identifiable, Sendable {
+    public let path: String
+    public let size: Int?
+    public var id: String { path }
+    public var name: String { (path as NSString).lastPathComponent }
+}
+
+public struct ComfyUser: Identifiable, Sendable {
+    public let id: String
+    public let name: String
 }
 
 public struct ComfyOutput: Codable, Hashable, Identifiable, Sendable {
@@ -105,11 +122,13 @@ public struct ComfyAPIError: LocalizedError, Sendable {
     public let statusCode: Int?
     public let message: String
     public let nodeErrors: Data?
+    public let requiresBrowserVerification: Bool
 
-    public init(statusCode: Int? = nil, message: String, nodeErrors: Data? = nil) {
+    public init(statusCode: Int? = nil, message: String, nodeErrors: Data? = nil, requiresBrowserVerification: Bool = false) {
         self.statusCode = statusCode
         self.message = message
         self.nodeErrors = nodeErrors
+        self.requiresBrowserVerification = requiresBrowserVerification
     }
 
     public var errorDescription: String? { message }
@@ -158,6 +177,69 @@ public actor ComfyClient {
         let data = try await perform(request(path: ["object_info"]))
         _ = try Self.dictionary(data)
         return data
+    }
+
+    /// Reads ComfyUI's existing user profiles; never creates or changes one.
+    public func workflowUsers() async throws -> [ComfyUser] {
+        do {
+            let data = try await perform(request(path: ["users"]))
+            let value = try Self.dictionary(data)
+            guard let users = value["users"] as? [String: String] else { return [] }
+            return users.map { ComfyUser(id: $0.key, name: $0.value) }.sorted { $0.name < $1.name }
+        } catch let error as ComfyAPIError where error.statusCode == 404 { return [] }
+    }
+
+    public func serverWorkflows(userID: String? = nil) async throws -> [ServerWorkflow] {
+        var req = try request(path: ["userdata"], query: [
+            URLQueryItem(name: "dir", value: "workflows"), URLQueryItem(name: "recurse", value: "true"),
+            URLQueryItem(name: "split", value: "false"), URLQueryItem(name: "full_info", value: "true")])
+        try Self.setUser(userID, on: &req)
+        let data: Data
+        do { data = try await perform(req) }
+        catch let error as ComfyAPIError where error.statusCode == 404 {
+            throw ComfyAPIError(statusCode: 404, message: "服务器没有可读取的工作流目录，或未提供工作流接口。请先在 ComfyUI 的工作流列表中保存工作流，再刷新；也可以从文件导入。")
+        }
+        guard let records = try JSONSerialization.jsonObject(with: data) as? [Any] else {
+            throw ComfyAPIError(message: "服务器没有返回工作流列表。")
+        }
+        var seen = Set<String>()
+        return records.compactMap { record -> ServerWorkflow? in
+            let info = record as? [String: Any]
+            guard let path = (record as? String) ?? (info?["path"] as? String),
+                  Self.validWorkflowPath(path), seen.insert(path).inserted else { return nil }
+            return ServerWorkflow(path: path, size: (info?["size"] as? NSNumber)?.intValue)
+        }.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    public func serverWorkflow(path: String, userID: String? = nil) async throws -> Data {
+        guard Self.validWorkflowPath(path) else { throw ComfyAPIError(message: "工作流路径无效，只能读取 workflows 中的 JSON 文件。") }
+        var req = try request(path: ["userdata"])
+        var components = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)!
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        guard let encoded = ("workflows/" + path).addingPercentEncoding(withAllowedCharacters: allowed) else {
+            throw ComfyAPIError(message: "无法编码工作流路径。")
+        }
+        // ComfyUI's {file} route takes the full relative path as one encoded segment.
+        components.percentEncodedPath += "/" + encoded
+        req.url = components.url
+        try Self.setUser(userID, on: &req)
+        let data = try await perform(req)
+        guard data.count <= 12_000_000 else { throw ComfyAPIError(message: "工作流超过 12 MB，请导出不含预览图片的 JSON。") }
+        return data
+    }
+
+    private static func validWorkflowPath(_ path: String) -> Bool {
+        guard path.lowercased().hasSuffix(".json"), !path.contains("\\"), !path.contains("%"),
+              !path.contains(":"), !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return false }
+        return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+    }
+
+    private static func setUser(_ id: String?, on request: inout URLRequest) throws {
+        guard let id = id, !id.isEmpty else { return }
+        guard !id.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw ComfyAPIError(message: "ComfyUI 用户标识无效。")
+        }
+        request.setValue(id, forHTTPHeaderField: "comfy-user")
     }
 
     /// `prompt` is the API-format node dictionary, not a whole POST body or a UI workflow.
@@ -406,6 +488,11 @@ public actor ComfyClient {
         try Task.checkCancellation()
         let (data, response) = try await session.data(for: request)
         guard let response = response as? HTTPURLResponse else { throw ComfyAPIError(message: "服务器没有返回 HTTP 响应。") }
+        let prefix = String(decoding: data.prefix(1024), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let isHTML = response.mimeType?.lowercased() == "text/html" || prefix.hasPrefix("<!doctype html") || prefix.hasPrefix("<html")
+        if config.isDDNSTO && ((300...399).contains(response.statusCode) || response.statusCode == 401 || response.statusCode == 403 || isHTML) {
+            throw ComfyAPIError(statusCode: response.statusCode, message: "DDNSTO 连接需要检查网页验证。请点“去验证”，完成后关闭网页，App 会重新检查连接。", requiresBrowserVerification: true)
+        }
         guard (200...299).contains(response.statusCode) else {
             let fallback: String
             if (300...399).contains(response.statusCode) {

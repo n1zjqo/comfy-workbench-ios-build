@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct WorkflowPage: View {
     @EnvironmentObject var store: WorkbenchStore
     @State private var importing = false
+    @State private var browsingServer = false
     @State private var exporting = false
     @State private var exportFile = WorkflowFile(data: Data())
     @State private var allParameters = false
@@ -24,7 +25,18 @@ struct WorkflowPage: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) { Text("我的 AI 应用").font(.largeTitle.bold()); Text("让工作流变得顺手").font(.subheadline).foregroundColor(.secondary) }
                     Spacer()
-                    Button { importing = true } label: { Image(systemName: "plus").font(.title3).frame(width: 44, height: 44).glass(16) }.accessibilityLabel("导入工作流")
+                    Menu {
+                        Button { importing = true } label: { Label("从文件导入", systemImage: "doc.badge.plus") }
+                        Button { browsingServer = true } label: { Label("从服务器读取", systemImage: "server.rack") }
+                    } label: { Image(systemName: "plus").font(.title3).frame(width: 44, height: 44).glass(16) }.accessibilityLabel("添加工作流").disabled(store.busy)
+                }
+                if let status = store.importStatus {
+                    HStack(alignment: .top, spacing: 10) {
+                        if store.busy { ProgressView() }
+                        Text(status).font(.subheadline).textSelection(.enabled)
+                        Spacer(minLength: 0)
+                        if !store.busy { Button { store.importStatus = nil } label: { Image(systemName: "xmark").frame(width: 44, height: 44) }.accessibilityLabel("关闭导入提示") }
+                    }.padding(14).glass(18)
                 }
                 if store.workflows.isEmpty { emptyState }
                 else {
@@ -57,9 +69,18 @@ struct WorkflowPage: View {
                 }
             }.padding(24).padding(.bottom, 12)
         }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.json], allowsMultipleSelection: false) { result in
-            switch result { case .success(let urls): if let url = urls.first { Task { await store.importWorkflow(url) } }; case .failure(let error): store.error = error.localizedDescription }
+        .sheet(isPresented: $importing) {
+            WorkflowPicker { result in
+                importing = false
+                if let result = result {
+                    switch result {
+                    case .success(let url): Task { await store.importWorkflow(url) }
+                    case .failure(let error): store.importStatus = "导入失败：\(error.localizedDescription)"
+                    }
+                }
+            }
         }
+        .sheet(isPresented: $browsingServer) { ServerWorkflowLibrary() }
         .fileExporter(isPresented: $exporting, document: exportFile, contentType: .json, defaultFilename: store.selected?.name ?? "workflow") { result in if case .failure(let error) = result { store.error = error.localizedDescription } }
         .sheet(item: $editing) { FieldEditor(field: $0) }
         .sheet(isPresented: $graph) { NodeMapView() }
@@ -72,7 +93,8 @@ struct WorkflowPage: View {
     private var workflowSelector: some View {
         Menu {
             ForEach(store.workflows) { item in Button { store.select(item.id) } label: { Label(item.name, systemImage: item.id == store.selectedID ? "checkmark" : "square.stack") } }
-            Button("导入工作流…") { importing = true }
+            Button("从文件导入…") { importing = true }
+            Button("从服务器读取…") { browsingServer = true }
         } label: {
             HStack(alignment: .center, spacing: 14) {
                 Image(systemName: "square.stack.3d.up").font(.system(size: 25)).frame(width: 50, height: 54).background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 15))
@@ -89,7 +111,8 @@ struct WorkflowPage: View {
             Image(systemName: "slider.horizontal.below.rectangle").font(.system(size: 46, weight: .ultraLight)).padding(.top, 25)
             Text("把工作流\n装进一个小面板。").font(.system(size: 32, weight: .medium)).lineSpacing(6)
             Text("导入 ComfyUI JSON，直接调整提示词、尺寸、种子和模型。常用参数可以固定在这里。").font(.body).foregroundColor(.secondary).lineSpacing(5)
-            Button("导入工作流") { importing = true }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink).controlSize(.large)
+            Button("从文件导入") { importing = true }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink).controlSize(.large).disabled(store.busy)
+            Button { browsingServer = true } label: { Label("从服务器读取", systemImage: "server.rack").frame(minHeight: 44) }.disabled(store.busy)
             Text("API 格式可以离线编辑；普通画布格式需要先连接服务器。遇到无法可靠转换的自定义节点时，会指出原因。").font(.caption).foregroundColor(.secondary)
         }.padding(24).glass(28)
     }
@@ -218,5 +241,102 @@ struct NodeMapView: View {
             }.background(Color.black.opacity(0.2)).navigationTitle("节点关系").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { presentation.wrappedValue.dismiss() } } }
         }.navigationViewStyle(.stack).sheet(item: $editing) { FieldEditor(field: $0) }
+    }
+}
+
+
+struct ServerWorkflowLibrary: View {
+    @EnvironmentObject var store: WorkbenchStore
+    @Environment(\.presentationMode) private var presentation
+    @State private var config: ServerConfig?
+    @State private var users: [ComfyUser] = []
+    @State private var userID = ""
+    @State private var workflows: [ServerWorkflow] = []
+    @State private var search = ""
+    @State private var loading = false
+    @State private var failure: String?
+    @State private var importingID: String?
+    private var filtered: [ServerWorkflow] { workflows.filter { search.isEmpty || $0.path.localizedCaseInsensitiveContains(search) } }
+    var body: some View {
+        NavigationView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("读取 ComfyUI 中已保存的工作流，导入为手机上的副本。").font(.subheadline).foregroundColor(.secondary)
+                if config == nil {
+                    Text("先连接你的 ComfyUI 服务器。").font(.headline)
+                    Button("前往连接") { store.activeTab = 3; presentation.wrappedValue.dismiss() }.frame(minHeight: 44)
+                } else {
+                    if !users.isEmpty {
+                        Picker("ComfyUI 用户", selection: $userID) {
+                            Text("选择用户").tag("")
+                            ForEach(users) { user in Text(user.name).tag(user.id) }
+                        }.onChange(of: userID) { _ in Task { await refresh() } }.disabled(loading || store.busy)
+                    }
+                    TextField("搜索名称或文件夹", text: $search).textFieldStyle(.roundedBorder)
+                    if loading { ProgressView("正在读取服务器…").frame(maxWidth: .infinity).padding() }
+                    if let failure = failure {
+                        Text(failure).font(.subheadline).foregroundColor(.orange).textSelection(.enabled)
+                        if store.verificationRequired != nil {
+                            Button("前往连接验证") { store.activeTab = 3; presentation.wrappedValue.dismiss() }.frame(minHeight: 44)
+                        }
+                    }
+                    if !loading && failure == nil && workflows.isEmpty && (users.isEmpty || !userID.isEmpty) {
+                        Text("还没有保存的工作流").font(.headline)
+                        Text("请先在 ComfyUI 的工作流列表中保存文件，再点刷新。只存在于浏览器临时画布或其他服务器目录中的文件不会出现在这里。").font(.subheadline).foregroundColor(.secondary)
+                    }
+                    List(filtered) { workflow in
+                        Button {
+                            guard let config = config else { return }
+                            importingID = workflow.id; failure = nil
+                            Task {
+                                let success = await store.importServerWorkflow(workflow, config: config, userID: userID.isEmpty ? nil : userID)
+                                importingID = nil
+                                if success { presentation.wrappedValue.dismiss() }
+                                else { failure = store.importStatus }
+                            }
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "doc.text").foregroundColor(Palette.paper)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(workflow.name).foregroundColor(.primary)
+                                    Text(workflow.path).font(.caption).foregroundColor(.secondary)
+                                    if let size = workflow.size { Text(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)).font(.caption2).foregroundColor(.secondary) }
+                                }
+                                Spacer()
+                                if importingID == workflow.id { ProgressView() } else { Image(systemName: "arrow.down.to.line").font(.caption) }
+                            }.padding(.vertical, 6)
+                        }.disabled(loading || store.busy)
+                    }.listStyle(.plain)
+                }
+                Spacer(minLength: 0)
+            }.padding(20).background(Palette.ink.ignoresSafeArea())
+            .navigationTitle("服务器工作流").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("关闭") { presentation.wrappedValue.dismiss() }.disabled(store.busy) }
+                ToolbarItem(placement: .confirmationAction) { Button("刷新") { Task { await load() } }.disabled(config == nil || loading || store.busy) }
+            }
+        }.navigationViewStyle(.stack)
+        .task { await load() }
+    }
+    private func load() async {
+        guard !loading else { return }
+        if config != store.server { userID = ""; workflows = [] }
+        config = store.server
+        guard let config = config else { return }
+        loading = true; failure = nil; workflows = []
+        do {
+            users = try await store.makeClient(config).workflowUsers()
+            if !users.contains(where: { $0.id == userID }) { userID = "" }
+        }
+        catch { failure = error.localizedDescription; _ = store.noteVerification(error, config: config) }
+        loading = false
+        if failure == nil && (users.isEmpty || !userID.isEmpty) { await refresh() }
+    }
+    private func refresh() async {
+        guard !loading, let config = config else { return }
+        workflows = []; failure = nil
+        guard users.isEmpty || !userID.isEmpty else { return }
+        loading = true; defer { loading = false }
+        do { workflows = try await store.makeClient(config).serverWorkflows(userID: userID.isEmpty ? nil : userID) }
+        catch { failure = error.localizedDescription; _ = store.noteVerification(error, config: config) }
     }
 }

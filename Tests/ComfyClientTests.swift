@@ -227,8 +227,88 @@ final class ComfyClientTests: XCTestCase {
         }
     }
 
-    private func makeClient(_ handler: @escaping (URLRequest) throws -> ComfyMockResponse) -> ComfyClient {
-        let host = UUID().uuidString.lowercased() + ".test"
+    func testDDNSTOHostnameBoundary() {
+        XCTAssertTrue(ServerConfig(baseURL: "https://studio.ddnsto.com").isDDNSTO)
+        XCTAssertTrue(ServerConfig(baseURL: "  https://studio.ddnsto.com\n").isDDNSTO)
+        XCTAssertFalse(ServerConfig(baseURL: "https://ddnsto.com.attacker.test").isDDNSTO)
+        XCTAssertFalse(ServerConfig(baseURL: "https://notddnsto.com").isDDNSTO)
+    }
+
+    func testDDNSTORedirectOffersVerificationWithoutForwardingCredentials() async throws {
+        let client = makeClient(ddnsto: true) { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            return ComfyMockResponse(status: 302, data: Data(), headers: ["Location": "https://untrusted.test/login"])
+        }
+        do { _ = try await client.systemStats(); XCTFail("Expected verification") }
+        catch let error as ComfyAPIError { XCTAssertTrue(error.requiresBrowserVerification) }
+    }
+
+    func testDDNSTOHTMLChallengeIsDetectedWithSuccessStatus() async throws {
+        let client = makeClient(ddnsto: true) { _ in
+            ComfyMockResponse(data: Data("<!doctype html><html>verify</html>".utf8), headers: ["Content-Type": "text/html"])
+        }
+        do { _ = try await client.objectInfo(); XCTFail("Expected verification") }
+        catch let error as ComfyAPIError { XCTAssertTrue(error.requiresBrowserVerification) }
+    }
+
+    func testDDNSTOJSONIsNotMistakenForChallenge() async throws {
+        let client = makeClient(ddnsto: true) { _ in try .json(["text": "<html> is just text"]) }
+        _ = try await client.systemStats()
+    }
+
+    func testListsNestedServerWorkflowsAndFiltersUnsafePaths() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/proxy/userdata")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "comfy-user"), "chosen-user")
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+            XCTAssertEqual(query.first { $0.name == "dir" }?.value, "workflows")
+            XCTAssertEqual(query.first { $0.name == "recurse" }?.value, "true")
+            return ComfyMockResponse(data: try JSONSerialization.data(withJSONObject: [
+                ["path": "文生图/a #1.json", "size": 321], ["path": "../secrets.json"],
+                ["path": "/absolute.json"], ["path": "%2e%2e/escape.json"], ["path": "note.txt"],
+                ["path": "文生图/a #1.json", "size": 321]
+            ]))
+        }
+        let files = try await client.serverWorkflows(userID: "chosen-user")
+        XCTAssertEqual(files.map(\.path), ["文生图/a #1.json"])
+        XCTAssertEqual(files.first?.size, 321)
+    }
+
+    func testLegacyWorkflowListAndUserProfiles() async throws {
+        let client = makeClient { request in
+            if request.url?.path == "/proxy/users" { return try .json(["users": ["one-id": "One"]]) }
+            return ComfyMockResponse(data: Data(#"["folder/workflow.json","notes.txt"]"#.utf8))
+        }
+        let users = try await client.workflowUsers()
+        XCTAssertEqual(users.first?.id, "one-id")
+        let files = try await client.serverWorkflows()
+        XCTAssertEqual(files.map(\.path), ["folder/workflow.json"])
+    }
+
+    func testDownloadsWorkflowAsOneEncodedSegmentWithoutWrites() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            let components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+            XCTAssertEqual(components.percentEncodedPath, "/proxy/userdata/workflows%2Ffolder%2Fa%20%231.json")
+            XCTAssertNil(components.query)
+            XCTAssertNil(components.fragment)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "comfy-user"), "selected")
+            return try .json(["1": ["class_type": "Text", "inputs": ["text": "demo"]]])
+        }
+        let data = try await client.serverWorkflow(path: "folder/a #1.json", userID: "selected")
+        XCTAssertFalse(data.isEmpty)
+    }
+
+    func testRejectsServerPathTraversalBeforeRequest() async throws {
+        let client = makeClient { _ in XCTFail("Unsafe path should never be sent"); return try .json([:]) }
+        for path in ["../private.json", "/private.json", "a//b.json", "a/%2E%2E/b.json", "a\\b.json", "notes.txt"] {
+            do { _ = try await client.serverWorkflow(path: path); XCTFail(path) } catch {}
+        }
+    }
+
+    private func makeClient(ddnsto: Bool = false, _ handler: @escaping (URLRequest) throws -> ComfyMockResponse) -> ComfyClient {
+        let host = UUID().uuidString.lowercased() + (ddnsto ? ".ddnsto.com" : ".test")
         hosts.append(host)
         ComfyMockURLProtocol.register(host: host, handler: handler)
         let configuration = URLSessionConfiguration.ephemeral
@@ -260,6 +340,7 @@ final class ComfyClientTests: XCTestCase {
 private struct ComfyMockResponse {
     var status = 200
     var data: Data
+    var headers = ["Content-Type": "application/json"]
     static func json(_ value: [String: Any], status: Int = 200) throws -> ComfyMockResponse {
         ComfyMockResponse(status: status, data: try JSONSerialization.data(withJSONObject: value))
     }
@@ -291,7 +372,7 @@ private final class ComfyMockURLProtocol: URLProtocol, @unchecked Sendable {
         do {
             guard let handler = handler, let url = request.url else { throw URLError(.unsupportedURL) }
             let result = try handler(request)
-            guard let response = HTTPURLResponse(url: url, statusCode: result.status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"]) else { throw URLError(.badServerResponse) }
+            guard let response = HTTPURLResponse(url: url, statusCode: result.status, httpVersion: "HTTP/1.1", headerFields: result.headers) else { throw URLError(.badServerResponse) }
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: result.data)
             client?.urlProtocolDidFinishLoading(self)

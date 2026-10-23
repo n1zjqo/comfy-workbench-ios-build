@@ -1,7 +1,7 @@
 import Foundation
 
-/// Converts named-widget ComfyUI graphs using the connected server's node definitions.
-/// It deliberately does not infer positional widgets or execute frontend extensions.
+/// Converts named widgets and an explicit set of standard widget layouts.
+/// Unknown frontend extension layouts are rejected instead of guessed.
 public enum UIWorkflowConverter {
     public struct ConversionError: LocalizedError, Equatable {
         public let message: String
@@ -215,9 +215,48 @@ public enum UIWorkflowConverter {
             if let named = node.raw["widgets_values_named"]?.objectValue { return named }
             if let named = node.raw["widgets_values"]?.objectValue { return named }
             if let positional = node.raw["widgets_values"]?.arrayValue, !positional.isEmpty {
-                throw ConversionError("节点 \(node.id)（\(node.type)）只有按位置保存的参数，不能可靠推断名称。请在 ComfyUI 导出 API 格式。")
+                return try standardWidgets(node, positional: positional)
             }
             return [:]
+        }
+
+        func standardWidgets(_ node: Node, positional: [JSONValue]) throws -> [String: JSONValue] {
+            if ["SetNode", "GetNode"].contains(node.type), positional.count == 1, positional[0].stringValue != nil {
+                return ["Constant": positional[0]]
+            }
+            let layouts: [String: [String]] = [
+                "CheckpointLoaderSimple": ["ckpt_name"], "CLIPTextEncode": ["text"],
+                "EmptyLatentImage": ["width", "height", "batch_size"],
+                "EmptySD3LatentImage": ["width", "height", "batch_size"],
+                "KSampler": ["seed", "control_after_generate", "steps", "cfg", "sampler_name", "scheduler", "denoise"],
+                "KSamplerAdvanced": ["add_noise", "noise_seed", "control_after_generate", "steps", "cfg", "sampler_name", "scheduler", "start_at_step", "end_at_step", "return_with_leftover_noise"],
+                "VAELoader": ["vae_name"], "LoraLoader": ["lora_name", "strength_model", "strength_clip"],
+                "LoraLoaderModelOnly": ["lora_name", "strength_model"], "SaveImage": ["filename_prefix"],
+                "LoadImage": ["image"], "LatentUpscale": ["upscale_method", "width", "height", "crop"],
+                "ImageScale": ["upscale_method", "width", "height", "crop"],
+                "ImageScaleBy": ["upscale_method", "scale_by"], "LatentUpscaleBy": ["upscale_method", "scale_by"],
+                "UpscaleModelLoader": ["model_name"], "CLIPSetLastLayer": ["stop_at_clip_layer"]
+            ]
+            guard let keys = layouts[node.type], let schema = objectInfo[node.type]?["input"] else {
+                throw ConversionError("节点 \(node.id)（\(node.type)）的参数只按位置保存，尚无可靠的转换规则。请在 ComfyUI 导出 API 格式后导入。")
+            }
+            var values = positional
+            if node.type == "LoadImage", values.count == 2, ["image", "image_upload"].contains(values[1].stringValue ?? "") { values.removeLast() }
+            guard keys.count == values.count else {
+                throw ConversionError("节点 \(node.id)（\(node.type)）的参数数量与标准布局不符，请导出 API 格式。")
+            }
+            var result: [String: JSONValue] = [:]
+            for (key, value) in zip(keys, values) {
+                if key == "control_after_generate" {
+                    guard ["fixed", "increment", "decrement", "randomize"].contains(value.stringValue ?? "") else { throw invalidValue(node, key) }
+                    continue
+                }
+                guard schema["required"]?[key] != nil || schema["optional"]?[key] != nil else {
+                    throw ConversionError("服务器的 \(node.type).\(key) 与标准定义不符，请导出 API 格式。")
+                }
+                result[key] = value
+            }
+            return result
         }
 
         func expand(_ sections: [String: JSONValue], prefix: String, live: [String: JSONValue],

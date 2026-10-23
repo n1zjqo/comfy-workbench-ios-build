@@ -7,6 +7,28 @@ final class UIWorkflowConverterTests: XCTestCase {
         try JSONValue(data: UIWorkflowConverter.convert(data: Data(graph.utf8), objectInfoData: Data(info.utf8)))
     }
 
+    func testStandardSavedWorkflowKeepsNestedConnections() throws {
+        let graph = #"""
+        {"nodes":[
+          {"id":1,"type":"LoadImage","widgets_values":["demo.png","image"],"outputs":[{"type":"IMAGE"}]},
+          {"id":2,"type":"SaveImage","widgets_values":["result"],"inputs":[{"name":"images","link":1}],"outputs":[]}
+        ],"links":[[1,1,0,2,0,"IMAGE"]]}
+        """#
+        let info = #"""
+        {"LoadImage":{"input":{"required":{"image":[["demo.png"]]}}},
+         "SaveImage":{"output_node":true,"input":{"required":{"images":["IMAGE"],"filename_prefix":["STRING"]}}}}
+        """#
+        let result = try convert(graph, info)
+        XCTAssertEqual(result["1"]?["inputs"]?["image"], .string("demo.png"))
+        XCTAssertEqual(result["2"]?["inputs"]?["images"], .array([.string("1"), .integer(0)]))
+        XCTAssertEqual(result["2"]?["inputs"]?["filename_prefix"], .string("result"))
+    }
+
+    func testStandardLayoutMismatchDoesNotGuess() {
+        let info = #"{"SaveImage":{"output_node":true,"input":{"required":{"filename_prefix":["STRING"]}}}}"#
+        XCTAssertThrowsError(try convert(#"{"nodes":[{"id":1,"type":"SaveImage","widgets_values":["result","extra"],"outputs":[]}],"links":[]}"#, info))
+    }
+
     func testNamedWidgetsGetSetRerouteAndBypassKeepOnlyOutputAncestors() throws {
         let graph = #"""
         {"nodes":[

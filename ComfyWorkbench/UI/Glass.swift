@@ -1,6 +1,51 @@
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
+import SafariServices
+
+struct VerificationPage: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+struct VerificationBrowser: UIViewControllerRepresentable {
+    let url: URL
+    let onFinish: () -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(onFinish) }
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        // Authentication stays in the system browser; no password or cookie is read by this app.
+        let browser = SFSafariViewController(url: url)
+        browser.delegate = context.coordinator
+        return browser
+    }
+    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
+    final class Coordinator: NSObject, SFSafariViewControllerDelegate {
+        let finish: () -> Void
+        init(_ finish: @escaping () -> Void) { self.finish = finish }
+        func safariViewControllerDidFinish(_ controller: SFSafariViewController) { finish() }
+    }
+}
+
+struct WorkflowPicker: UIViewControllerRepresentable {
+    var onResult: (Result<URL, Error>?) -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(onResult) }
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+        picker.allowsMultipleSelection = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+    func updateUIViewController(_ controller: UIDocumentPickerViewController, context: Context) {}
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let result: (Result<URL, Error>?) -> Void
+        init(_ result: @escaping (Result<URL, Error>?) -> Void) { self.result = result }
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            guard let url = urls.first else { result(nil); return }
+            result(.success(url))
+        }
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { result(nil) }
+    }
+}
 
 enum Palette {
     static let ink = Color(red: 0.09, green: 0.17, blue: 0.23)

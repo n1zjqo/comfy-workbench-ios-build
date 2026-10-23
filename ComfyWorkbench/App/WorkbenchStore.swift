@@ -47,6 +47,11 @@ private struct SavedState: Codable {
     @Published var connectionStatus = "尚未连接"
     @Published var background: UIImage?
     @Published var activeTab = 1
+    @Published var importStatus: String?
+    @Published var verificationRequired: ServerConfig?
+    @Published var verificationPage: VerificationPage?
+    private var failedConnection: (config: ServerConfig, password: String)?
+    private var browserAttempt: (config: ServerConfig, password: String)?
     var clientID = UUID().uuidString
     private var objectInfoData: Data?
     private var monitor: Task<Void, Never>?
@@ -84,13 +89,56 @@ private struct SavedState: Codable {
         } catch { self.error = error.localizedDescription }
     }
     func importWorkflow(_ url: URL) async {
-        let access = url.startAccessingSecurityScopedResource()
-        defer { if access { url.stopAccessingSecurityScopedResource() } }
-        busy = true; defer { busy = false }
+        guard !busy else { return }
+        busy = true; importStatus = "正在读取文件…"
+        defer { busy = false }
         do {
-            let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            guard size <= 12_000_000 else { throw WorkflowError.invalid("工作流超过 12 MB，请导出不含预览图片的 JSON。") }
-            var data = try Data(contentsOf: url)
+            let data = try await Task.detached(priority: .userInitiated) {
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                var coordinationError: NSError?
+                var result: Result<Data, Error>?
+                NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { location in
+                    result = Result {
+                        let values = try location.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                        guard values.isDirectory != true else { throw WorkflowError.invalid("请选择 JSON 文件，而不是文件夹。") }
+                        guard (values.fileSize ?? 0) <= 12_000_000 else { throw WorkflowError.invalid("工作流超过 12 MB。") }
+                        let file = try FileHandle(forReadingFrom: location)
+                        defer { try? file.close() }
+                        return try WorkflowImportData.normalized(file.read(upToCount: 12_000_001) ?? Data())
+                    }
+                }
+                if let error = coordinationError { throw error }
+                guard let result = result else { throw WorkflowError.invalid("文件提供器未返回内容，请先在“文件”App 下载文件后重试。") }
+                return try result.get()
+            }.value
+            try await finishImport(data: data, name: url.deletingPathExtension().lastPathComponent)
+        } catch {
+            importStatus = "导入失败：\(error.localizedDescription)"
+            if let config = server { _ = noteVerification(error, config: config) }
+        }
+    }
+
+    func importServerWorkflow(_ workflow: ServerWorkflow, config: ServerConfig, userID: String?) async -> Bool {
+        guard !busy else { return false }
+        busy = true; importStatus = "正在读取服务器工作流…"
+        defer { busy = false }
+        do {
+            guard server == config else { throw WorkflowError.invalid("连接已改变，请重新打开服务器工作流列表。") }
+            guard (workflow.size ?? 0) <= 12_000_000 else { throw WorkflowError.invalid("工作流超过 12 MB。") }
+            let data = try await makeClient(config).serverWorkflow(path: workflow.path, userID: userID)
+            try await finishImport(data: data, name: (workflow.name as NSString).deletingPathExtension)
+            return true
+        } catch {
+            importStatus = "导入失败：\(error.localizedDescription)"
+            _ = noteVerification(error, config: config)
+            return false
+        }
+    }
+
+    private func finishImport(data source: Data, name: String) async throws {
+            var data = try WorkflowImportData.normalized(source)
+            importStatus = "正在解析工作流…"
             let json = try JSONValue(data: data)
             if json["nodes"]?.arrayValue != nil {
                 guard let server = server else { throw WorkflowError.invalid("这是画布格式。请先连接 ComfyUI 读取节点定义，再导入；也可以先在 ComfyUI 中导出 API 格式。") }
@@ -101,9 +149,13 @@ private struct SavedState: Codable {
             }
             let info = try objectInfoData.map { try ObjectInfo(data: $0) }
             let parsed = try WorkflowDocument(data: data, objectInfo: info)
-            var item = SavedWorkflow(name: url.deletingPathExtension().lastPathComponent, data: try parsed.data())
+            var item = SavedWorkflow(name: name, data: try parsed.data())
             for node in json["nodes"]?.arrayValue ?? [] {
-                if node["widgets_values_named"]?["control_after_generate"]?.stringValue == "randomize", let id = node["id"]?.displayValue {
+                let type = node["type"]?.stringValue ?? ""
+                let controlIndex = type == "KSampler" ? 1 : (type == "KSamplerAdvanced" ? 2 : -1)
+                let widgets = node["widgets_values"]?.arrayValue ?? []
+                let positionalRandom = controlIndex >= 0 && controlIndex < widgets.count && widgets[controlIndex].stringValue == "randomize"
+                if node["widgets_values_named"]?["control_after_generate"]?.stringValue == "randomize" || positionalRandom, let id = node["id"]?.displayValue {
                     item.randomSeedFields.formUnion(parsed.fields.filter { $0.nodeID == id && ["seed", "noise_seed"].contains($0.name) }.map(\.id))
                 }
             }
@@ -114,7 +166,7 @@ private struct SavedState: Codable {
             }
             workflows.append(item); selectedID = item.id; document = parsed
             try persist(); activeTab = 1
-        } catch { self.error = error.localizedDescription }
+            importStatus = "已导入：\(name)"
     }
     func saveDocument() throws {
         guard let index = workflows.firstIndex(where: { $0.id == selectedID }), let document = document else { return }
@@ -156,9 +208,45 @@ private struct SavedState: Codable {
             try KeychainStore.savePassword(password, for: config.passwordKey)
             server = config; objectInfoData = metadata
             if var draft = document { try? draft.applyObjectInfo(info); document = draft }
-            connectionStatus = "已连接"; try persist(); resumeMonitoring()
-        } catch { self.error = error.localizedDescription; connectionStatus = "连接失败" }
+            connectionStatus = "已连接"
+            if verificationRequired?.baseURL == config.baseURL { verificationRequired = nil }
+            failedConnection = nil
+            try persist(); resumeMonitoring()
+        } catch {
+            connectionStatus = "连接失败"
+            if noteVerification(error, config: config) { failedConnection = (config, password) }
+            else { self.error = error.localizedDescription }
+        }
     }
+    @discardableResult
+    func noteVerification(_ error: Error, config: ServerConfig) -> Bool {
+        guard (error as? ComfyAPIError)?.requiresBrowserVerification == true else { return false }
+        verificationRequired = config
+        connectionStatus = "需要网页验证"
+        return true
+    }
+
+    func beginVerification(config: ServerConfig, password: String? = nil) {
+        guard !busy, verificationPage == nil else { return }
+        do {
+            let url = try config.validatedBaseURL()
+            guard url.scheme?.lowercased() == "https" else { throw WorkflowError.invalid("网页验证请填写完整的 HTTPS 外网地址。局域网 HTTP 地址无需 DDNSTO 验证。") }
+            let saved = failedConnection?.config == config ? failedConnection?.password : nil
+            let storedPassword = try KeychainStore.password(for: config.passwordKey)
+            browserAttempt = (config, password ?? saved ?? storedPassword ?? "")
+            pauseMonitoring()
+            verificationPage = VerificationPage(url: url)
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func finishVerification() async {
+        guard let attempt = browserAttempt else { return }
+        browserAttempt = nil
+        connectionStatus = "正在检查验证结果…"
+        // Only GET requests are made here. Closing a browser never resubmits a generation.
+        await connect(config: attempt.config, password: attempt.password)
+    }
+
     func makeClient(_ config: ServerConfig) throws -> ComfyClient {
         ComfyClient(config: config, password: try KeychainStore.password(for: config.passwordKey))
     }
@@ -208,7 +296,7 @@ private struct SavedState: Codable {
                 try? persist()
                 if submissionAttempted && !rejected { resumeMonitoring() }
             }
-            self.error = error.localizedDescription
+            if !noteVerification(error, config: config) { self.error = error.localizedDescription }
         }
     }
     func upload(url: URL, field: WorkflowField) async {
@@ -244,7 +332,7 @@ private struct SavedState: Codable {
     }
     func resumeMonitoring() {
         pauseMonitoring()
-        guard jobs.contains(where: { !$0.finished }) else { return }
+        guard verificationPage == nil, jobs.contains(where: { !$0.finished }) else { return }
         monitor = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.poll()
@@ -268,7 +356,7 @@ private struct SavedState: Codable {
         }
     }
     func poll() async {
-        for job in jobs.filter({ !$0.finished }) {
+        for job in jobs.filter({ !$0.finished && $0.server.baseURL != verificationRequired?.baseURL }) {
             if Task.isCancelled { return }
             do {
                 let client = try makeClient(job.server)
@@ -300,6 +388,7 @@ private struct SavedState: Codable {
                 try persist()
             } catch {
                 if Task.isCancelled { return }
+                _ = noteVerification(error, config: job.server)
                 if let index = jobs.firstIndex(where: { $0.id == job.id && !$0.finished }) { jobs[index].detail = "查询未完成，恢复连接后继续查询：\(error.localizedDescription)" }
             }
         }
