@@ -1,6 +1,25 @@
 # 验证记录
 
-## 当前版本：0.2.0（build 2）
+## 当前版本：0.3.0（build 3）
+
+- 构建出处：[GitHub Actions](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/39984099647)。
+- 构建源码提交：`2e74abb1174b03c8b4530db7469e7144a5fa76bf`。
+- Xcode 16.4 / iOS 18.5 SDK，Release arm64 iPhone 构建成功，最低系统版本 iOS 15.0。
+- 55 项 XCTest 零失败；14 个 Swift 源文件的工程结构检查通过。
+- 新增 13 项测试覆盖坐标与尺寸、默认名称、两种连线表示、循环图自动布局、UInt64、参数双份同步、保存与导出重导入、歧义拒绝、连接保护、类型与范围校验。
+- CI ad-hoc 签名验证通过；下载后 ZIP CRC、SHA-256、版本号、bundle ID、arm64 与 Mach-O 最低系统版本再次核对通过。
+- bundle ID 保持 `com.comfyworkbench.ios`，build 3 可用于更新已有同标识的安装。
+- 公开源文件共 42 个，不含用户工作流、提示词、服务器地址或凭据；测试数据均为合成。
+- 本地独立 HTML 设计预览已检查 375×812 画面、参数保存、搜索定位和总览。该预览不是原生截图，不能代替 iPhone 手势和渲染验收。
+- 仍需在 iPhone XS / iOS 15 实测 TrollStore 安装、画布缩放性能、键盘和实际工作流运行；未声称已进行 GPU 生成或 DDNSTO 联调。
+
+IPA SHA-256：
+
+```text
+5e43132fa3d97d7e7747d21d1eff36f5db8712aa450b5d62e4af76d09cfe29ac
+```
+
+## 历史版本：0.2.0（build 2）
 
 - 修复文件类型筛选导致的导入限制并加入内容校验；新增 DDNSTO 手动网页验证入口与服务器工作流列表。
 - 构建出处：[GitHub Actions run 39974336324](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/39974336324)。
