@@ -2,16 +2,16 @@
 
 面向 iPhone / iOS 15.0+ 的非官方原生 SwiftUI 客户端，参考 [Mimikkoro1/comfy-workbench-android](https://github.com/Mimikkoro1/comfy-workbench-android) 的直连 ComfyUI 与工作流参数映射思路，提供对话式生成、AI 应用式参数面板及右滑清屏。界面设计参考 [Anthropic frontend-design](https://github.com/anthropics/skills/blob/main/skills/frontend-design/SKILL.md)。
 
-版本 **0.1.0（build 1）** 已通过 [GitHub Actions 构建](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/39949930078)：30 项 XCTest 零失败，并已生成 arm64 IPA。构建使用 Xcode 16.4 / iOS 18.5 SDK，部署目标为 iOS 15.0；下载后的 IPA 已独立核对 SHA-256、arm64 架构、Info.plist 与 Mach-O 最低系统版本。尚未完成 TrollStore 安装、iPhone XS / iOS 15 实机验收及真实 ComfyUI 服务器联调。详细出处与文件哈希见 `VALIDATION.md`。
+版本 **0.2.0（build 2）** 已通过 [GitHub Actions 构建](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/39974336324)：42 项 XCTest 零失败，并已生成 arm64 IPA。构建使用 Xcode 16.4 / iOS 18.5 SDK，部署目标为 iOS 15.0；下载后的 IPA 已独立核对 SHA-256、arm64 架构、Info.plist 与 Mach-O 最低系统版本。尚未完成新版在 iPhone XS / iOS 15 上的实机验收及真实 ComfyUI / DDNSTO 联调。详细出处与文件哈希见 `VALIDATION.md`。
 
-## 0.2.0 更新（待 macOS 编译）
+## 0.2.0 更新
 
 - 文件导入改用 iOS 系统文档选择器，允许选择文件提供器未正确标为 JSON 的文件，再按实际内容检查。加入云端文件协调读取、后台读取、大小限制、BOM / UTF-16 兼容及明确的进度和错误信息。iPhone XS 上的原问题仍需安装新版后复测。
 - “应用”页右上角“+”增加“从服务器读取”，列出 ComfyUI 用户目录下已保存的 JSON，支持子文件夹、搜索、多用户选择。读取后保存为手机副本，不修改服务器文件。普通画布导入仍需要服务器的节点定义。
 - “连接”页支持手动输入 DDNSTO HTTPS 地址，并提供“打开网页验证”。常见 DDNSTO 域名返回验证页面时会提示；关闭系统浏览器后只重新检查连接与查询任务，不自动重发生成。
 - 增加标准节点画布参数转换；无法确认对应关系的第三方节点会要求导出 API JSON，不猜测参数。
 
-0.2.0 的本地工程结构检查已通过，新增 12 项 XCTest（共 42 项），尚未执行 macOS XCTest、Xcode 编译或生成新版 IPA。下面的 0.1.0 构建记录仅说明旧版状态。
+0.2.0 已通过工程结构检查、全部 42 项 XCTest、Xcode Release 编译、ad-hoc 签名校验与下载后包体检查。自动化验证不能代替 iPhone XS 上的文件选择、服务器读取和 DDNSTO 实际验证。
 
 ## 功能
 
@@ -68,7 +68,7 @@ bash scripts/build-ipa.sh
 python3 scripts/verify-source.py
 ```
 
-结构检查仅验证文件、JSON、plist、源文件引用与构建配置。0.1.0 CI 的 30 项 XCTest 已通过；0.2.0 的 42 项测试尚待执行。测试覆盖 JSON/大整数/连接保持、画布转换、HTTP 错误、任务恢复、认证/路径和取消范围。自动化测试使用合成数据，不代替真实服务器和设备验收。
+结构检查仅验证文件、JSON、plist、源文件引用与构建配置。0.2.0 CI 的 42 项 XCTest 已通过。测试覆盖 JSON/大整数/连接保持、画布转换、HTTP 错误、任务恢复、认证/路径和取消范围。自动化测试使用合成数据，不代替真实服务器和设备验收。
 
 ## 验证范围与限制
 

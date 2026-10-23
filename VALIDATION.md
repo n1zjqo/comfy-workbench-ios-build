@@ -1,12 +1,22 @@
 # 验证记录
 
-## 当前源码：0.2.0（build 2）
+## 当前版本：0.2.0（build 2）
 
-- 新增 DDNSTO 手动网页验证入口、服务器工作流列表，修复文件类型筛选导致的导入限制并加入内容校验。
-- 本地结构检查已通过。42 项 XCTest 已编写，尚未在 macOS 执行；尚无 0.2.0 IPA。
-- 构建通过 GitHub Actions 手动触发，本次测试与产物结果将在 macOS 构建完成后更新。
-- 尚未在 iPhone XS / iOS 15 复测文件选择器，也未验证实际 DDNSTO 域名或真实服务器工作流读取。
+- 修复文件类型筛选导致的导入限制并加入内容校验；新增 DDNSTO 手动网页验证入口与服务器工作流列表。
+- 构建出处：[GitHub Actions run 39974336324](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/39974336324)。
+- 构建源码提交：`5354d9de8f08101afe58b4138f81f0beb559756c`。
+- Xcode 16.4 / iOS 18.5 SDK，Release arm64 iPhone 构建成功；最低系统版本为 iOS 15.0。
+- 42 项 XCTest 执行完成，零失败；本地结构检查通过。
+- CI 的 ad-hoc 签名验证和 IPA 包体校验通过。下载后再次核对 ZIP CRC、SHA-256、版本号、bundle ID、arm64 架构、Info.plist 与 Mach-O 最低系统版本，均符合预期。
+- bundle ID 维持 `com.comfyworkbench.ios`，与已交付的公开构建 0.1.0 一致。
 - 新增测试覆盖 DDNSTO 响应识别、路径编码和越界拒绝、用户与工作流列表、文件编码和内容检查、标准节点位置参数转换。
+- 尚未在 iPhone XS / iOS 15 上复测文件选择器、服务器工作流读取或实际 DDNSTO 域名。自动化通过不代表这些实机操作已经验收。
+
+0.2.0 IPA SHA-256：
+
+```text
+50b59e29a952af4227a56977a7eaa56df44b2017226db716b24e29dd1640acfd
+```
 
 ## 历史版本：0.1.0（build 1）
 
