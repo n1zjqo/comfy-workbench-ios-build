@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 struct SavedWorkflow: Codable, Identifiable {
     var id = UUID()
