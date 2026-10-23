@@ -101,4 +101,10 @@ final class WorkflowCanvasTests: XCTestCase {
         let api = try UIWorkflowConverter.convert(data: canvas.data(), objectInfoData: info)
         XCTAssertEqual(try WorkflowDocument(data: api).fields.first?.value, .string("after"))
     }
+    func testConnectedWidgetsAndFrontendButtonsAreNotPresentedAsEditableInputs() throws {
+        var canvas = try graph(#"{"nodes":[{"id":1,"type":"Source"},{"id":2,"type":"Custom","inputs":[{"name":"text","link":9}],"widgets_values_named":{"text":"stale","upload":"button","steps":12}}],"links":[[9,1,0,2,0,"STRING"]]}"#)
+        XCTAssertEqual(canvas.fields.map(\.name), ["steps"])
+        XCTAssertThrowsError(try canvas.update(fieldID: "2.text", fromText: "unused"))
+        XCTAssertEqual(canvas.root["nodes"]?.arrayValue?[1]["widgets_values_named"]?["text"], .string("stale"))
+    }
 }

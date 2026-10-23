@@ -154,6 +154,12 @@ public struct WorkflowCanvas {
                     return WorkflowField(nodeID: id, nodeType: type, name: name, value: v, schema: info?.schema(for: type, input: name) ?? .inferred(name: name, value: v))
                 }
             }
+            let connected = Set((raw["inputs"]?.arrayValue ?? []).compactMap { input -> String? in
+                guard let link = input["link"], link != .null else { return nil }
+                return input["name"]?.stringValue
+            })
+            let controls: Set<String> = ["upload", "choose video to upload", "videopreview", "preview", "control_after_generate"]
+            fields.removeAll { connected.contains($0.name) || controls.contains($0.name) }
             result.append(CanvasNode(id: id, type: type, x: position.0, y: position.1, width: size.0,
                                      height: raw["flags"]?["collapsed"]?.boolValue == true ? 34 : size.1,
                                      inputs: (raw["inputs"]?.arrayValue ?? []).map { $0["name"]?.stringValue ?? "input" },
@@ -186,6 +192,8 @@ public struct WorkflowCanvas {
         var incoming = Dictionary(uniqueKeysWithValues: raw.map { ($0.id, 0) })
         var outgoing: [String: [String]] = [:]
         for e in edges { incoming[e.targetNodeID, default: 0] += 1; outgoing[e.sourceNodeID, default: []].append(e.targetNodeID) }
+        var outputCounts: [String: Int] = [:]
+        for edge in edges { outputCounts[edge.sourceNodeID] = max(outputCounts[edge.sourceNodeID] ?? 0, min(1000, edge.sourceOutputIndex) + 1) }
         var queue = raw.filter { incoming[$0.id] == 0 }.map(\.id), cursor = 0
         var ranks: [String: Int] = [:]
         while cursor < queue.count {
@@ -203,7 +211,7 @@ public struct WorkflowCanvas {
             let rank = ranks[node.id] ?? 0
             let fields = allFields[node.id] ?? []
             let inputs = node.inputs.keys.sorted()
-            let outputCount = min(1000, (edges.filter { $0.sourceNodeID == node.id }.map(\.sourceOutputIndex).max() ?? -1) + 1)
+            let outputCount = min(1000, outputCounts[node.id] ?? 0)
             let height = Double(max(136, 64 + max(min(fields.count, 4), max(inputs.count, outputCount)) * 25))
             result.append(CanvasNode(id: node.id, type: node.classType, x: Double(rank) * 390, y: heights[rank] ?? 0, width: 280, height: height,
                                      inputs: inputs, outputs: (0..<outputCount).map { "output \($0)" }, fields: fields, bypassed: false))

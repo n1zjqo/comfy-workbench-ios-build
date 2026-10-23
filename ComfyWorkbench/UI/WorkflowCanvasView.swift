@@ -289,14 +289,20 @@ final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
         }
         if scale > 0.44 && r.height > 90 {
             let slots = max(node.inputs.count, node.outputs.count)
-            let start = r.minY + 44 + CGFloat(min(slots, 4)) * 17
-            for (i, field) in node.fields.prefix(4).enumerated() {
-                let y = start + CGFloat(i) * 29
+            var y = r.minY + 48 + CGFloat(min(slots, 4)) * 23 + 8
+            for field in node.fields.prefix(4) {
                 guard y + 25 < r.maxY - 8 else { break }
-                let row = CGRect(x: r.minX + 12, y: y, width: r.width - 24, height: 24)
+                let multiline = field.schema.multiline && r.maxY - y > 85
+                let height: CGFloat = multiline ? min(140, r.maxY - y - 12) : 24
+                let row = CGRect(x: r.minX + 12, y: y, width: r.width - 24, height: height)
                 UIColor.black.withAlphaComponent(0.14).setFill(); UIBezierPath(roundedRect: row, cornerRadius: 6).fill()
                 text(field.name, in: CGRect(x: row.minX + 8, y: y + 6, width: row.width * 0.45, height: 14), size: 9, color: .white.withAlphaComponent(0.48))
-                text(field.value.displayValue.replacingOccurrences(of: "\n", with: " "), in: CGRect(x: row.minX + row.width * 0.46, y: y + 6, width: row.width * 0.54 - 8, height: 14), size: 9, color: .white.withAlphaComponent(0.8), right: true)
+                if multiline {
+                    text(String(field.value.displayValue.prefix(400)), in: CGRect(x: row.minX + 8, y: y + 25, width: row.width - 16, height: height - 34), size: 11, color: .white.withAlphaComponent(0.73), multiline: true)
+                } else {
+                    text(String(field.value.displayValue.prefix(160)).replacingOccurrences(of: "\n", with: " "), in: CGRect(x: row.minX + row.width * 0.46, y: y + 6, width: row.width * 0.54 - 8, height: 14), size: 9, color: .white.withAlphaComponent(0.8), right: true)
+                }
+                y += height + 6
             }
         }
         ctx.restoreGState()
@@ -312,8 +318,9 @@ final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
         }
         ctx.restoreGState()
     }
-    private func text(_ value: String, in rect: CGRect, size: CGFloat, weight: UIFont.Weight = .regular, color: UIColor, right: Bool = false) {
-        let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byTruncatingTail; paragraph.alignment = right ? .right : .left
+    private func text(_ value: String, in rect: CGRect, size: CGFloat, weight: UIFont.Weight = .regular, color: UIColor, right: Bool = false, multiline: Bool = false) {
+        let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = multiline ? .byWordWrapping : .byTruncatingTail; paragraph.alignment = right ? .right : .left
+        if multiline { paragraph.lineSpacing = 4 }
         (value as NSString).draw(in: rect, withAttributes: [.font: UIFont.systemFont(ofSize: size, weight: weight), .foregroundColor: color, .paragraphStyle: paragraph])
     }
     private func drawMinimap(_ graph: WorkflowCanvas, ctx: CGContext) {
