@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
+    <key>CFBundleDisplayName</key><string>Comfy Workbench</string>
+    <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>LSRequiresIPhoneOS</key><true/>
+    <key>MinimumOSVersion</key><string>15.0</string>
+    <key>NSLocalNetworkUsageDescription</key><string>连接你的 ComfyUI 服务器，读取工作流参数、提交生成任务并显示结果。</string>
+    <key>NSPhotoLibraryAddUsageDescription</key><string>在你选择保存作品时，将图片或视频存入相册。</string>
+    <key>NSAppTransportSecurity</key>
+    <dict><key>NSAllowsArbitraryLoads</key><true/></dict>
+    <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
+    <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
+    <key>UILaunchScreen</key><dict/>
+    <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
+    <key>UIUserInterfaceStyle</key><string>Dark</string>
+</dict>
+</plist>

@@ -1,0 +1,41 @@
+name: Build iOS 15 IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Validate source package
+        run: python3 scripts/verify-source.py
+      - name: Test workflow and network logic
+        run: swift test
+      - name: Build and verify arm64 IPA
+        run: bash scripts/build-ipa.sh
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ComfyWorkbench-iOS15
+          path: |
+            build/ComfyWorkbench.ipa
+            build/ComfyWorkbench.ipa.sha256
+            build/macho-build-info.txt
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
