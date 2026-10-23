@@ -45,7 +45,7 @@ if [[ -d "$APP/Frameworks" ]]; then
 fi
 codesign --force --sign - --timestamp=none "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
-xcrun lipo -verify_arch arm64 "$APP/ComfyWorkbench"
+xcrun lipo "$APP/ComfyWorkbench" -verify_arch arm64
 xcrun vtool -show-build "$APP/ComfyWorkbench" | tee "$BUILD_DIR/macho-build-info.txt"
 python3 - "$APP/Info.plist" <<'PY'
 import plistlib
