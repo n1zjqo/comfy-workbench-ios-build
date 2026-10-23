@@ -59,7 +59,6 @@ public struct ComfyOutput: Codable, Hashable, Identifiable, Sendable {
     public var subfolder: String
     public var type: String
     public var nodeID: String?
-    public var nodes: [String] = []
     public var kind: String
     public var id: String { [nodeID ?? "", type, subfolder, filename].joined(separator: "|") }
     public var workflowInputPath: String { subfolder.isEmpty ? filename : "\(subfolder)/\(filename)" }
@@ -104,6 +103,7 @@ public struct ComfyEvent: Sendable {
     public var type: String
     public var promptID: String?
     public var nodeID: String?
+    public var nodes: [String] = []
     public var value: Double?
     public var maximum: Double?
     public var queueRemaining: Int?
