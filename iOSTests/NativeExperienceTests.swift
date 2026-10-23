@@ -71,10 +71,11 @@ final class NativeExperienceTests: XCTestCase {
     }
 
     @MainActor func testGlassUsesRealBlurAndCapsulePathStaysWithinBounds() throws {
+        XCTAssertFalse(UIAccessibility.isReduceTransparencyEnabled, "Blur checks require the default simulator accessibility setting")
         let window = host(ZStack {
             ArtworkBackground(image: testImage())
             Text("Test").foregroundColor(.white).frame(width: 330, height: 54).glass(30)
-        }.environment(\.accessibilityReduceTransparency, false))
+        })
         defer { window.isHidden = true }
         let blur = try XCTUnwrap(descendants(window).compactMap { $0 as? UIVisualEffectView }.first)
         XCTAssertNotNil(blur.effect)

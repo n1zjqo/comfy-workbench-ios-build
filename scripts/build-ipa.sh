@@ -16,14 +16,18 @@ python3 "$PROJECT_ROOT/scripts/verify-source.py"
 xcodebuild -version
 plutil -lint "$PROJECT_ROOT/ComfyWorkbench/Info.plist" "$PROJECT_ROOT/ComfyWorkbench.xcodeproj/project.pbxproj"
 # Use an already installed iPhone simulator; never download a runtime implicitly.
+SIMULATOR_SDK="$(xcrun --sdk iphonesimulator --show-sdk-version)"
 SIMULATOR_ID="$(xcrun simctl list devices available -j | python3 -c '
 import json, sys
 data = json.load(sys.stdin)
-phones = [(runtime, device) for runtime, devices in data["devices"].items() if ".iOS-" in runtime for device in devices if device["name"].startswith("iPhone") and device.get("isAvailable")]
-assert phones, "No installed iPhone simulator is available"
+sdk = tuple(int(n) for n in sys.argv[1].split("."))
+phones = [(tuple(int(n) for n in runtime.split(".iOS-")[1].split("-")), device) for runtime, devices in data["devices"].items() if ".iOS-" in runtime for device in devices if device["name"].startswith("iPhone") and device.get("isAvailable")]
+phones = [(runtime, device) for runtime, device in phones if runtime <= sdk]
+assert phones, "No installed iPhone simulator compatible with the selected Xcode SDK"
 runtime, device = sorted(phones, key=lambda entry: entry[0], reverse=True)[0]
+print("Native tests: iOS " + ".".join(map(str, runtime)) + " / " + device["name"], file=sys.stderr)
 print(device["udid"])
-')"
+' "$SIMULATOR_SDK")"
 xcodebuild \
     -project "$PROJECT_ROOT/ComfyWorkbench.xcodeproj" \
     -scheme ComfyWorkbench \
