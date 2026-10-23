@@ -91,6 +91,10 @@ public struct WorkflowCanvas {
     public mutating func update(fieldID: String, fromText text: String) throws {
         guard let field = fields.first(where: { $0.id == fieldID }) else { throw WorkflowError.invalid("找不到这个参数。") }
         let value = try field.parsedValue(from: text)
+        try update(fieldID: fieldID, value: value)
+    }
+    public mutating func update(fieldID: String, value: JSONValue) throws {
+        guard let field = fields.first(where: { $0.id == fieldID }) else { throw WorkflowError.invalid("找不到这个参数。") }
         // Reuse the API editor's exact type/range validation, including UInt64 seeds.
         let validationJSON = JSONValue.object([field.nodeID: .object(["class_type": .string(field.nodeType), "inputs": .object([field.name: field.value])])])
         var validation = try WorkflowDocument(data: validationJSON.data(), objectInfo: info)

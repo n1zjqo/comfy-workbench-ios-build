@@ -15,7 +15,7 @@ struct WorkflowPage: View {
     @State private var pendingDelete: UUID?
     var fields: [WorkflowField] {
         let available = store.canvas?.fields ?? []
-        let base = allParameters ? available : available.filter { store.selected?.pinned.contains($0.id) == true }
+        let base = allParameters ? available : store.panelItems.compactMap { item in available.first { $0.id == item.id } }
         guard !search.isEmpty else { return base }
         return base.filter { "\($0.name) \($0.nodeType) \($0.nodeID)".localizedCaseInsensitiveContains(search) }
     }
@@ -41,6 +41,7 @@ struct WorkflowPage: View {
                 if store.workflows.isEmpty { emptyState }
                 else {
                     workflowSelector
+                    EditHistoryBar()
                     HStack(spacing: 12) {
                         Button { graph = true } label: { Label("打开画布", systemImage: "point.3.connected.trianglepath.dotted").font(.caption).frame(minHeight: 44) }.disabled(store.canvas == nil)
                         Spacer()
@@ -66,12 +67,14 @@ struct WorkflowPage: View {
                     Picker("参数范围", selection: $allParameters) { Text("应用参数").tag(false); Text("全部参数").tag(true) }.pickerStyle(.segmented)
                     if allParameters { TextField("搜索参数或节点", text: $search).padding(12).background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12)) }
                     if fields.isEmpty { Text("点“配置面板”选择你常用的参数。全部参数仍然可以查看。").font(.subheadline).foregroundColor(.secondary).padding(.vertical, 25) }
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(fields) { field in
-                            Button { editing = field } label: { ParameterRow(field: field) }.buttonStyle(.plain)
-                            Divider().padding(.leading, 16)
-                        }
-                    }.background(Palette.ink.opacity(0.92), in: RoundedRectangle(cornerRadius: 20)).clipShape(RoundedRectangle(cornerRadius: 20))
+                    if allParameters {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(fields) { field in
+                                Button { editing = field } label: { ParameterRow(field: field) }.buttonStyle(.plain)
+                                Divider().padding(.leading, 16)
+                            }
+                        }.background(Palette.ink.opacity(0.92), in: RoundedRectangle(cornerRadius: 20)).clipShape(RoundedRectangle(cornerRadius: 20))
+                    } else { ApplicationPanel { editing = $0 } }
                     if let count = store.canvas?.fields.count { Text("共 \(count) 个参数。也可以打开画布，点击节点编辑。").font(.caption).foregroundColor(.secondary) }
                     Button { Task { await store.submit() } } label: {
                         HStack { if store.busy { ProgressView() }; Text("生成作品").font(.headline); Spacer(); Image(systemName: "sparkles") }.padding(.horizontal, 20).frame(height: 54)
@@ -92,7 +95,7 @@ struct WorkflowPage: View {
         }
         .sheet(isPresented: $browsingServer) { ServerWorkflowLibrary() }
         .fileExporter(isPresented: $exporting, document: exportFile, contentType: .json, defaultFilename: store.selected?.name ?? "workflow") { result in if case .failure(let error) = result { store.error = error.localizedDescription } }
-        .sheet(item: $editing) { FieldEditor(field: $0) }
+        .sheet(item: $editing) { field in FieldEditor(field: field, configuration: allParameters ? nil : store.panelItems.first { $0.id == field.id }) }
         .fullScreenCover(isPresented: $graph) { WorkflowCanvasView() }
         .sheet(isPresented: $manageFields) { PanelConfiguration() }
         .alert("删除这个应用？", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) {
@@ -148,17 +151,21 @@ struct FieldEditor: View {
     @EnvironmentObject var store: WorkbenchStore
     @Environment(\.presentationMode) private var presentation
     let field: WorkflowField
+    var configuration: PanelFieldConfiguration?
     @State private var text: String
     @State private var error: String?
     @State private var pickingFile = false
     @State private var filter = ""
     @State private var randomSeed = false
+    @State private var leaving = false
+    @State private var restoredDraft = false
     private var filteredChoices: [JSONValue] { field.schema.options.filter { filter.isEmpty || $0.displayValue.localizedCaseInsensitiveContains(filter) } }
-    init(field: WorkflowField) { self.field = field; _text = State(initialValue: field.value.displayValue) }
+    init(field: WorkflowField, configuration: PanelFieldConfiguration? = nil) { self.field = field; self.configuration = configuration; _text = State(initialValue: field.value.displayValue) }
     var body: some View {
         NavigationView {
             VStack(alignment: .leading, spacing: 14) {
                 Text("\(field.nodeType)  #\(field.nodeID)").font(.caption).foregroundColor(.secondary)
+                if restoredDraft { Text("已恢复上次未完成的编辑").font(.caption).foregroundColor(.mint) }
                 if field.schema.isUpload {
                     Button { pickingFile = true } label: { Label(store.busy ? "上传中…" : "上传参考素材", systemImage: "arrow.up.doc").frame(minHeight: 44) }.disabled(store.busy)
                 }
@@ -174,7 +181,7 @@ struct FieldEditor: View {
                 } else if field.schema.kind == .boolean {
                     Toggle(field.name, isOn: Binding(get: { text == "true" }, set: { text = $0 ? "true" : "false" }))
                     Spacer()
-                } else if field.schema.multiline {
+                } else if configuration?.control == .multiline || (configuration?.control != .text && field.schema.multiline) {
                     TextEditor(text: $text).font(.body).padding(8).background(Palette.ink).cornerRadius(14)
                     Text("\(text.count) 字符").font(.caption).foregroundColor(.secondary)
                 } else {
@@ -189,42 +196,23 @@ struct FieldEditor: View {
                 }
                 if let error = error { Text(error).font(.caption).foregroundColor(.red) }
             }.padding(20).background(Palette.ink.ignoresSafeArea())
-            .navigationTitle(field.name).navigationBarTitleDisplayMode(.inline)
+            .navigationTitle(configuration?.title(for: field) ?? field.name).navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { presentation.wrappedValue.dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("保存") { do { try store.edit(field, text: text); if field.name.lowercased().contains("seed") { try store.setRandomSeed(field.id, enabled: randomSeed) }; presentation.wrappedValue.dismiss() } catch { self.error = error.localizedDescription } }.disabled(store.busy) }
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { leaving = true; store.saveEditorDraft(field.id, text: nil); presentation.wrappedValue.dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("保存") { do { try store.edit(field, text: text); if field.name.lowercased().contains("seed") { try store.setRandomSeed(field.id, enabled: randomSeed) }; leaving = true; presentation.wrappedValue.dismiss() } catch { self.error = error.localizedDescription } }.disabled(store.busy) }
             }
         }.navigationViewStyle(.stack)
-        .onAppear { randomSeed = store.selected?.randomSeedFields.contains(field.id) ?? false }
+        .onAppear {
+            randomSeed = store.selected?.randomSeedFields.contains(field.id) ?? false
+            if let draft = store.editorDraft(field.id), draft != field.value.displayValue { text = draft; restoredDraft = true }
+        }
+        .onChange(of: text) { if !leaving { store.saveEditorDraft(field.id, text: $0) } }
+        .onDisappear { store.saveDraftsNow() }
         .fileImporter(isPresented: $pickingFile, allowedContentTypes: [.image, .movie, .audio], allowsMultipleSelection: false) { result in
             if case .success(let urls) = result, let url = urls.first {
                 Task { await store.upload(url: url, field: field); if store.error == nil { text = store.canvas?.fields.first { $0.id == field.id }?.value.displayValue ?? text } else { error = store.error; store.error = nil } }
             } else if case .failure(let error) = result { self.error = error.localizedDescription }
         }
-    }
-}
-
-struct PanelConfiguration: View {
-    @EnvironmentObject var store: WorkbenchStore
-    @Environment(\.presentationMode) private var presentation
-    var body: some View {
-        NavigationView {
-            List {
-                Section(header: Text("聊天提示词入口")) {
-                    Picker("发送到", selection: Binding(get: { store.currentPromptField?.id ?? "" }, set: { store.choosePrompt($0) })) {
-                        ForEach(store.document?.fields.filter { $0.schema.kind == .text && !$0.schema.isUpload } ?? []) { field in Text("\(field.nodeType) #\(field.nodeID) / \(field.name)").tag(field.id) }
-                    }
-                }
-                Section(header: Text("固定在应用页的参数")) {
-                    ForEach(store.canvas?.fields ?? []) { field in
-                        Toggle(isOn: Binding(get: { store.selected?.pinned.contains(field.id) ?? false }, set: { store.pin(field, enabled: $0) })) {
-                            VStack(alignment: .leading, spacing: 4) { Text(field.name); Text("\(field.nodeType) #\(field.nodeID)").font(.caption).foregroundColor(.secondary) }
-                        }
-                    }
-                }
-            }.navigationTitle("配置面板").navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { presentation.wrappedValue.dismiss() } } }
-        }.navigationViewStyle(.stack)
     }
 }
 

@@ -28,7 +28,9 @@ assert references <= set(definitions), f"Unknown project references: {references
 
 file_refs = dict(re.findall(
     r"([A-F0-9]{24}) /\*[^\n]*?\*/ = \{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = \"([^\"]+)\";", project))
-actual_sources = {str(path.relative_to(ROOT)).replace("\\", "/") for path in (ROOT / "ComfyWorkbench").rglob("*.swift")}
+app_sources = {path.relative_to(ROOT).as_posix() for path in (ROOT / "ComfyWorkbench").rglob("*.swift")}
+test_sources = {path.relative_to(ROOT).as_posix() for path in (ROOT / "iOSTests").rglob("*.swift")}
+actual_sources = app_sources | test_sources
 assert set(file_refs.values()) == actual_sources, (
     f"Missing project refs: {actual_sources - set(file_refs.values())}; "
     f"Missing files: {set(file_refs.values()) - actual_sources}")
@@ -36,15 +38,21 @@ all_build_refs = dict(re.findall(
     r"([A-F0-9]{24}) /\*[^\n]*?\*/ = \{isa = PBXBuildFile; fileRef = ([A-F0-9]{24});", project))
 build_refs = {key: value for key, value in all_build_refs.items() if value in file_refs}
 assert set(build_refs.values()) == set(file_refs), "Swift file omitted from a build file"
-source_phase = re.search(r"isa = PBXSourcesBuildPhase;.*?files = \((.*?)\);", project, re.S)
-assert source_phase
-phase_ids = re.findall(r"\b[A-F0-9]{24}\b", source_phase[1])
-assert set(phase_ids) == set(build_refs) and len(phase_ids) == len(build_refs), "Incorrect Sources phase"
+source_phases = re.findall(r"isa = PBXSourcesBuildPhase;.*?files = \((.*?)\);", project, re.S)
+assert len(source_phases) == 2
+for phase, expected in zip(source_phases, (app_sources, test_sources)):
+    phase_ids = re.findall(r"\b[A-F0-9]{24}\b", phase)
+    assert len(phase_ids) == len(set(phase_ids)), "Duplicate source build entry"
+    assert {file_refs[build_refs[key]] for key in phase_ids} == expected, "Incorrect Sources phase"
 
 scheme = ElementTree.parse(ROOT / "ComfyWorkbench.xcodeproj/xcshareddata/xcschemes/ComfyWorkbench.xcscheme")
 for entry in scheme.iter("BuildableReference"):
     assert entry.attrib["BlueprintIdentifier"] in definitions
-    assert entry.attrib["BuildableName"] == "ComfyWorkbench.app"
+    assert entry.attrib["BuildableName"] == {
+        "D00000000000000000000001": "ComfyWorkbench.app",
+        "D00000000000000000000003": "ComfyWorkbenchNativeTests.xctest",
+    }[entry.attrib["BlueprintIdentifier"]]
+assert len(list(scheme.iter("TestableReference"))) == 1
 workflow = (ROOT / ".github/workflows/ios-build.yml").read_text(encoding="utf-8")
 assert "workflow_dispatch:" in workflow and "swift test" in workflow
 assert not re.search(r"^  (push|pull_request|schedule):", workflow, re.M)

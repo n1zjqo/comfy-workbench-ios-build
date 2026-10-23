@@ -58,42 +58,89 @@ struct GlassSurface: ViewModifier {
     var radius: CGFloat = 22
     @Environment(\.accessibilityReduceTransparency) var reduceTransparency
     func body(content: Content) -> some View {
+        let shape = GlassContour(radius: radius)
         content.background {
-            if reduceTransparency { RoundedRectangle(cornerRadius: radius).fill(Palette.ink) }
-            else { RoundedRectangle(cornerRadius: radius).fill(.ultraThinMaterial) }
+            ZStack {
+                if reduceTransparency { Palette.ink }
+                else { NativeFrost(); Color.white.opacity(0.025) }
+                LinearGradient(colors: [.white.opacity(0.055), .clear, Color(red: 0.78, green: 0.91, blue: 0.96).opacity(0.025)], startPoint: .topLeading, endPoint: .bottomTrailing)
+            }.clipShape(shape)
         }
-        .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(LinearGradient(colors: [.white.opacity(0.6), .white.opacity(0.08), .white.opacity(0.32)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.7))
-        .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
+        .overlay(shape.inset(by: 0.45).stroke(LinearGradient(colors: [.white.opacity(0.44), .white.opacity(0.035), .white.opacity(0.22)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.6).clipShape(shape))
+        .shadow(color: .black.opacity(0.10), radius: 14, y: 5)
     }
 }
 extension View { func glass(_ radius: CGFloat = 22) -> some View { modifier(GlassSurface(radius: radius)) } }
 
+/// One bounded, closed path for both the blur and its reflection. Oversized
+/// continuous corners on short controls can produce protruding edge segments.
+struct GlassContour: InsettableShape {
+    var radius: CGFloat
+    var amount: CGFloat = 0
+    func path(in rect: CGRect) -> Path {
+        let bounded = rect.insetBy(dx: amount, dy: amount)
+        guard bounded.width > 0, bounded.height > 0 else { return Path() }
+        let corner = ArtworkMetrics.radius(radius, size: rect.size, inset: amount)
+        return Path(roundedRect: bounded, cornerRadius: corner)
+    }
+    func inset(by amount: CGFloat) -> GlassContour { var result = self; result.amount += amount; return result }
+}
+
+struct NativeFrost: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIVisualEffectView { UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark)) }
+    func updateUIView(_ view: UIVisualEffectView, context: Context) {}
+}
+
 struct ArtworkBackground: View {
     var image: UIImage?
+    var clean = false
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                LinearGradient(colors: [Color(red: 0.34, green: 0.48, blue: 0.56), Palette.ink, Color(red: 0.29, green: 0.25, blue: 0.33)], startPoint: .topLeading, endPoint: .bottomTrailing)
                 if let image = image {
-                    Image(uiImage: image).resizable().scaledToFill().frame(width: geo.size.width, height: geo.size.height).clipped()
+                    if clean { FittedArtwork(image: image, margin: CGSize(width: 28, height: 112)) }
+                    else {
+                        ArtworkImageSurface(image: image).frame(width: geo.size.width, height: geo.size.height).clipped()
+                        LinearGradient(stops: [.init(color: .black.opacity(0.18), location: 0), .init(color: .clear, location: 0.22), .init(color: .clear, location: 0.72), .init(color: .black.opacity(0.13), location: 1)], startPoint: .top, endPoint: .bottom)
+                    }
                 } else {
+                    LinearGradient(colors: [Color(red: 0.34, green: 0.48, blue: 0.56), Palette.ink, Color(red: 0.29, green: 0.25, blue: 0.33)], startPoint: .topLeading, endPoint: .bottomTrailing)
                     Ellipse().fill(Palette.paper.opacity(0.24)).frame(width: geo.size.width * 0.9, height: geo.size.height * 0.75).rotationEffect(.degrees(-32)).blur(radius: 40).offset(x: -90, y: -140)
                     Ellipse().fill(Palette.rose.opacity(0.5)).frame(width: 260, height: 420).blur(radius: 55).offset(x: 170, y: 180)
                 }
-                LinearGradient(colors: [.clear, .black.opacity(0.08), .black.opacity(0.48)], startPoint: .top, endPoint: .bottom)
             }
         }.ignoresSafeArea()
+    }
+}
+
+struct ArtworkImageSurface: UIViewRepresentable {
+    let image: UIImage
+    func makeUIView(context: Context) -> UIImageView { let view = UIImageView(); view.contentMode = .scaleAspectFill; view.clipsToBounds = true; view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal); view.setContentCompressionResistancePriority(.defaultLow, for: .vertical); return view }
+    func updateUIView(_ view: UIImageView, context: Context) { view.image = image }
+}
+
+struct FittedArtwork: View {
+    let image: UIImage
+    var margin = CGSize(width: 28, height: 112)
+    var body: some View {
+        GeometryReader { geo in
+            let size = ArtworkMetrics.fittedSize(image: image.size, available: CGSize(width: max(1, geo.size.width - margin.width), height: max(1, geo.size.height - margin.height)))
+            ZStack {
+                Color.black
+                Image(uiImage: image).resizable().frame(width: size.width, height: size.height)
+                    .clipShape(GlassContour(radius: 12)).overlay(CrystalFrame().frame(width: size.width, height: size.height))
+            }.frame(width: geo.size.width, height: geo.size.height)
+        }
     }
 }
 
 struct CrystalFrame: View {
     @Environment(\.accessibilityReduceTransparency) var reduceTransparency
     var body: some View {
-        RoundedRectangle(cornerRadius: 35, style: .continuous)
-            .strokeBorder(reduceTransparency ? AnyShapeStyle(Palette.ink) : AnyShapeStyle(.ultraThinMaterial), lineWidth: 12)
-            .overlay(RoundedRectangle(cornerRadius: 35, style: .continuous).strokeBorder(LinearGradient(colors: [.white.opacity(0.85), .white.opacity(0.1), .white.opacity(0.5)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1))
-            .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(.white.opacity(0.17), lineWidth: 0.6).padding(10))
-            .padding(.horizontal, 9).padding(.vertical, 7).allowsHitTesting(false).accessibilityHidden(true)
+        GlassContour(radius: 12).inset(by: 1.25)
+            .stroke(reduceTransparency ? AnyShapeStyle(Palette.ink) : AnyShapeStyle(.ultraThinMaterial), lineWidth: 2.5)
+            .overlay(GlassContour(radius: 12).inset(by: 0.4).stroke(LinearGradient(stops: [.init(color: .white.opacity(0.75), location: 0), .init(color: .white.opacity(0.08), location: 0.38), .init(color: Color(red: 0.78, green: 0.91, blue: 0.96).opacity(0.38), location: 0.72), .init(color: .white.opacity(0.65), location: 1)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.6))
+            .clipShape(GlassContour(radius: 12)).allowsHitTesting(false).accessibilityHidden(true)
     }
 }
 

@@ -15,6 +15,25 @@ fi
 python3 "$PROJECT_ROOT/scripts/verify-source.py"
 xcodebuild -version
 plutil -lint "$PROJECT_ROOT/ComfyWorkbench/Info.plist" "$PROJECT_ROOT/ComfyWorkbench.xcodeproj/project.pbxproj"
+# Use an already installed iPhone simulator; never download a runtime implicitly.
+SIMULATOR_ID="$(xcrun simctl list devices available -j | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+phones = [(runtime, device) for runtime, devices in data["devices"].items() if ".iOS-" in runtime for device in devices if device["name"].startswith("iPhone") and device.get("isAvailable")]
+assert phones, "No installed iPhone simulator is available"
+runtime, device = sorted(phones, key=lambda entry: entry[0], reverse=True)[0]
+print(device["udid"])
+')"
+xcodebuild \
+    -project "$PROJECT_ROOT/ComfyWorkbench.xcodeproj" \
+    -scheme ComfyWorkbench \
+    -configuration Debug \
+    -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+    -derivedDataPath "$BUILD_DIR/SimulatorData" \
+    -resultBundlePath "$BUILD_DIR/NativeTests.xcresult" \
+    -parallel-testing-enabled NO \
+    CODE_SIGNING_ALLOWED=NO \
+    test | tee "$BUILD_DIR/xcodebuild.log"
 xcodebuild \
     -project "$PROJECT_ROOT/ComfyWorkbench.xcodeproj" \
     -scheme ComfyWorkbench \
@@ -28,7 +47,7 @@ xcodebuild \
     ARCHS=arm64 \
     ONLY_ACTIVE_ARCH=NO \
     IPHONEOS_DEPLOYMENT_TARGET=15.0 \
-    build | tee "$BUILD_DIR/xcodebuild.log"
+    build | tee -a "$BUILD_DIR/xcodebuild.log"
 
 SOURCE_APP="$DERIVED_DATA/Build/Products/Release-iphoneos/ComfyWorkbench.app"
 test -d "$SOURCE_APP"

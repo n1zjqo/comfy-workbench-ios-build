@@ -2,7 +2,7 @@ import SwiftUI
 import AVKit
 import ImageIO
 
-private func downsampledImage(_ url: URL, maxPixelSize: Int) -> UIImage? {
+func downsampledImage(_ url: URL, maxPixelSize: Int) -> UIImage? {
     guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
           let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
               kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: maxPixelSize] as CFDictionary) else { return nil }
@@ -45,7 +45,7 @@ struct OutputStrip: View {
                     Button { selection = MediaSelection(output: output, job: job) } label: { OutputThumbnail(output: output, job: job) }.buttonStyle(.plain)
                 }
             }
-        }.sheet(item: $selection) { MediaDetail(output: $0.output, job: $0.job) }
+        }.fullScreenCover(item: $selection) { MediaDetail(output: $0.output, job: $0.job) }
     }
 }
 
@@ -85,20 +85,29 @@ struct MediaDetail: View {
     @State private var error: String?
     @State private var share = false
     @State private var attempt = 0
+    @State private var controls = false
     var body: some View {
-        NavigationView {
-            VStack(spacing: 20) {
-                if let player = player { VideoPlayer(player: player) }
-                else if let image = image { GeometryReader { geo in ScrollView([.horizontal, .vertical]) { Image(uiImage: image).resizable().scaledToFit().frame(width: geo.size.width, height: geo.size.height) } } }
-                else if let error = error { Text(error).font(.subheadline); Button("重试") { attempt += 1 } }
-                else { Spacer(); ProgressView("正在读取作品…"); Spacer() }
-                HStack(spacing: 18) {
-                    if let image = image { Button("设为聊天底图") { store.setBackground(image); presentation.wrappedValue.dismiss(); store.activeTab = 0 }.buttonStyle(.bordered) }
-                    Button { share = true } label: { Label("分享 / 保存", systemImage: "square.and.arrow.up") }.buttonStyle(.bordered).disabled(url == nil)
-                }.padding(.bottom, 18)
-            }.padding(16).background(Color.black.ignoresSafeArea()).navigationTitle(output.filename).navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { presentation.wrappedValue.dismiss() } } }
-        }.navigationViewStyle(.stack)
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let player = player { VideoPlayer(player: player) }
+            else if let image = image {
+                FittedArtwork(image: image).ignoresSafeArea().contentShape(Rectangle()).onTapGesture { controls.toggle() }
+                    .accessibilityLabel("生成图片，轻触显示操作").accessibilityAddTraits(.isButton)
+            } else if let error = error {
+                VStack(spacing: 18) { Text(error).font(.subheadline); Button("重试") { attempt += 1 } }.padding(24)
+            } else { ProgressView("正在读取作品…") }
+            VStack {
+                HStack {
+                    Button { presentation.wrappedValue.dismiss() } label: { Image(systemName: "xmark").frame(width: 44, height: 44).glass(22) }.accessibilityLabel("关闭图片")
+                    Spacer()
+                    if controls || image == nil { Button { share = true } label: { Image(systemName: "square.and.arrow.up").frame(width: 44, height: 44).glass(22) }.accessibilityLabel("分享或保存").disabled(url == nil) }
+                }
+                Spacer()
+                if controls, let image = image {
+                    Button("设为聊天背景") { store.setBackground(image); presentation.wrappedValue.dismiss(); store.activeTab = 0 }.padding(.horizontal, 22).frame(height: 44).glass(22)
+                }
+            }.padding(.horizontal, 18).padding(.vertical, 12)
+        }.statusBar(hidden: true).preferredColorScheme(.dark)
         .task(id: attempt) {
             error = nil
             do {

@@ -7,7 +7,7 @@ struct WorkbenchView: View {
     @State private var photoPicker = false
     var body: some View {
         ZStack {
-            ArtworkBackground(image: store.background)
+            ArtworkBackground(image: store.background, clean: clean)
             VStack(spacing: 0) {
                 if let config = store.verificationRequired, !clean {
                     HStack(spacing: 12) {
@@ -36,8 +36,8 @@ struct WorkbenchView: View {
                     }.padding(.vertical, 7).glass(26).padding(.horizontal, 18).padding(.bottom, 6)
                 }
             }
-            if clean { CrystalFrame() }
         }
+        .statusBar(hidden: clean)
         .tint(Palette.paper)
         .alert("提示", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) {
             Button("知道了", role: .cancel) { store.error = nil }
@@ -71,7 +71,7 @@ struct ChatView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 5) {
-                            Text("创作对话").font(.title.bold())
+                            Text("创作").font(.system(size: 22, weight: .semibold))
                             Text(store.selected?.name ?? "选择一个工作流开始").font(.caption).foregroundColor(.white.opacity(0.7)).lineLimit(1)
                         }
                         Spacer()
@@ -82,10 +82,10 @@ struct ChatView: View {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 14) {
                                 Spacer(minLength: 70)
-                                if store.jobs.isEmpty {
+                                if store.jobs.isEmpty && store.background == nil {
                                     VStack(alignment: .leading, spacing: 12) {
-                                        Text("让画面，留在眼前。").font(.system(size: 28, weight: .medium, design: .serif))
-                                        Text("选好工作流，输入提示词开始生成。\n右滑清屏，左滑回来。").font(.subheadline).foregroundColor(.white.opacity(0.75)).lineSpacing(5)
+                                        Text("输入提示词，开始创作").font(.system(size: 22, weight: .medium))
+                                        Text("生成图片将自动成为背景。\n右滑清屏，左滑回来。").font(.subheadline).foregroundColor(.white.opacity(0.75)).lineSpacing(5)
                                     }.padding(24).padding(.top, 100)
                                 }
                                 ForEach(store.jobs) { job in JobBubble(job: job).id(job.id) }
@@ -95,14 +95,11 @@ struct ChatView: View {
                         }
                     }
                     VStack(alignment: .leading, spacing: 8) {
-                        if let field = store.currentPromptField {
-                            Text("提示词入口：\(field.nodeType)  #\(field.nodeID) / \(field.name)").font(.caption2).foregroundColor(.white.opacity(0.65)).lineLimit(1)
-                        }
                         HStack(alignment: .bottom, spacing: 10) {
                             TextField("描述你想生成的画面…", text: $message).font(.body).focused($focused).padding(.vertical, 13)
                             Button {
-                                let text = message; focused = false
-                                Task { await store.submit(message: text); if store.error == nil { message = "" } }
+                                let text = message, workflowID = store.selectedID; focused = false
+                                Task { await store.submit(message: text); if store.error == nil && message == text && store.selectedID == workflowID { message = "" } }
                             } label: {
                                 Image(systemName: "arrow.up").font(.system(size: 19, weight: .semibold)).frame(width: 44, height: 44).foregroundColor(Palette.ink).background(Palette.paper, in: Circle())
                             }.disabled(store.busy || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("发送提示词并生成")
@@ -114,8 +111,8 @@ struct ChatView: View {
                 .allowsHitTesting(!clean).accessibilityHidden(clean)
                 if clean {
                     VStack { Spacer(); Button { toggleClean(false) } label: {
-                        Label("恢复", systemImage: "chevron.left").font(.caption).padding(.horizontal, 16).frame(height: 44).glass(22)
-                    }.padding(.bottom, 22) }
+                        Image(systemName: "chevron.left").font(.system(size: 14, weight: .medium)).frame(width: 44, height: 44).glass(22)
+                    }.accessibilityLabel("恢复聊天").padding(.bottom, 22) }
                 }
             }
             .contentShape(Rectangle())
@@ -129,6 +126,9 @@ struct ChatView: View {
                     else if clean && value.translation.width < -65 { toggleClean(false) }
                 })
         }.sheet(isPresented: $photoPicker) { PhotoPicker { store.setBackground($0) } }
+        .onAppear { message = store.selected?.chatDraft ?? "" }
+        .onChange(of: store.selectedID) { _ in message = store.selected?.chatDraft ?? "" }
+        .onChange(of: message) { store.setChatDraft($0) }
     }
     private func toggleClean(_ value: Bool) {
         focused = false
@@ -197,7 +197,7 @@ struct ConnectionPage: View {
                 }.padding(20).glass()
                 Divider()
                 Text("Comfy Workbench for iOS").font(.headline)
-                Text("0.3.0 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
+                Text("0.4.0 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
             }.padding(24)
         }.onAppear {
             if let config = store.server { address = config.baseURL; username = config.username; key = config.passwordKey; password = (try? KeychainStore.password(for: key)) ?? "" }

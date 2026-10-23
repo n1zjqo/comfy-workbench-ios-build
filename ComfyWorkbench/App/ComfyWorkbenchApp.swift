@@ -10,7 +10,7 @@ struct ComfyWorkbenchApp: App {
                 .onAppear { store.resumeMonitoring() }
                 .onChange(of: phase) { value in
                     if value == .active { store.resumeMonitoring() }
-                    else if value == .background { store.pauseMonitoring() }
+                    else if value == .background { store.pauseMonitoring(); store.saveDraftsNow() }
                 }
         }
     }

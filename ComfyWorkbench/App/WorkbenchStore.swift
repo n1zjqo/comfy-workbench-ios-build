@@ -3,16 +3,6 @@ import UIKit
 import SwiftUI
 import CryptoKit
 
-struct SavedWorkflow: Codable, Identifiable {
-    var id = UUID()
-    var name: String
-    var data: Data
-    var pinned: Set<String> = []
-    var promptField: String?
-    var randomSeedFields: Set<String> = []
-    var canvasWidgetOrder: [String: [String]]?
-}
-
 struct GenerationJob: Codable, Identifiable {
     var id = UUID()
     var date = Date()
@@ -27,6 +17,8 @@ struct GenerationJob: Codable, Identifiable {
     var outputs: [ComfyOutput] = []
     var text: [String] = []
     var detail: String?
+    var workflowID: UUID?
+    var execution: ExecutionTrace?
 }
 
 private struct SavedState: Codable {
@@ -35,6 +27,7 @@ private struct SavedState: Codable {
     var server: ServerConfig?
     var jobs: [GenerationJob]
     var clientID: String
+    var backgroundDate: Date?
 }
 
 @MainActor final class WorkbenchStore: ObservableObject {
@@ -60,27 +53,50 @@ private struct SavedState: Codable {
     private var monitor: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
     private var eventClient: ComfyClient?
-    private var root: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ComfyWorkbench", isDirectory: true) }
+    private var draftSaveTask: Task<Void, Never>?
+    private var backgroundTask: Task<Void, Never>?
+    private var backgroundDate: Date?
+    private var backgroundRevision = UUID()
+    private var bufferedEvents: [ComfyEvent] = []
+    private let root: URL
     var selected: SavedWorkflow? { workflows.first { $0.id == selectedID } }
+    var panelItems: [PanelFieldConfiguration] {
+        guard let selected = selected else { return [] }
+        let fields = canvas?.fields ?? []
+        if let items = selected.panelItems { return items.filter { item in fields.contains { $0.id == item.id } } }
+        return fields.filter { selected.pinned.contains($0.id) }.map { PanelFieldConfiguration(id: $0.id) }
+    }
+    var canvasJob: GenerationJob? {
+        let matching = jobs.filter { $0.workflowID == selectedID && $0.workflowID != nil }
+        return matching.last { !$0.finished && $0.execution?.phase == .running } ?? matching.last
+    }
+    var canUndo: Bool { !(selected?.journal?.past.isEmpty ?? true) }
+    var canRedo: Bool { !(selected?.journal?.future.isEmpty ?? true) }
     var currentPromptField: WorkflowField? {
         guard let document = document else { return nil }
         if let id = selected?.promptField { return document.fields.first { $0.id == id } }
         return document.fields.first { $0.name == "prompts" && $0.schema.kind == .text }
             ?? document.fields.first { ["prompt", "text", "positive"].contains($0.name) && $0.schema.kind == .text && !$0.nodeType.lowercased().contains("show") }
     }
-    init() {
+    init(storageURL: URL? = nil) {
+        root = storageURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ComfyWorkbench", isDirectory: true)
         do {
             let data = try Data(contentsOf: root.appendingPathComponent("state.json"))
             let state = try JSONDecoder().decode(SavedState.self, from: data)
             workflows = state.workflows; selectedID = state.selectedID; server = state.server
             jobs = state.jobs; clientID = state.clientID
+            backgroundDate = state.backgroundDate
+            for index in jobs.indices where !jobs[index].finished { jobs[index].execution?.disconnect() }
             if let item = selected { try loadWorkflow(item) }
         } catch { if FileManager.default.fileExists(atPath: root.appendingPathComponent("state.json").path) { self.error = "本地数据读取失败，原文件已保留：\(error.localizedDescription)" } }
-        if let data = try? Data(contentsOf: root.appendingPathComponent("background.jpg")) { background = UIImage(data: data) }
+        if let data = try? Data(contentsOf: root.appendingPathComponent("background.jpg")) {
+            background = UIImage(data: data)
+            if backgroundDate == nil { backgroundDate = (try? FileManager.default.attributesOfItem(atPath: root.appendingPathComponent("background.jpg").path)[.modificationDate]) as? Date }
+        }
     }
     func persist() throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let state = SavedState(workflows: workflows, selectedID: selectedID, server: server, jobs: jobs, clientID: clientID)
+        let state = SavedState(workflows: workflows, selectedID: selectedID, server: server, jobs: jobs, clientID: clientID, backgroundDate: backgroundDate)
         try JSONEncoder().encode(state).write(to: root.appendingPathComponent("state.json"), options: .atomic)
     }
     func select(_ id: UUID) {
@@ -190,22 +206,19 @@ private struct SavedState: Codable {
         } catch { canvasRunIssue = error.localizedDescription; _ = noteVerification(error, config: config) }
     }
     func edit(_ field: WorkflowField, text: String) throws {
-        guard var draft = canvas, let index = workflows.firstIndex(where: { $0.id == selectedID }) else { throw WorkflowError.invalid("先选择工作流。") }
-        try draft.update(fieldID: field.id, fromText: text)
-        let previous = workflows[index]
-        workflows[index].data = try draft.data(); workflows[index].canvasWidgetOrder = draft.widgetOrder
-        do { try persist() } catch { workflows[index] = previous; throw error }
-        try loadWorkflow(workflows[index])
+        guard let current = canvas?.fields.first(where: { $0.id == field.id }) else { throw WorkflowError.invalid("找不到这个参数。") }
+        let change = WorkflowChange(kind: .parameter, fieldID: current.id, label: current.name, before: current.value, after: try current.parsedValue(from: text))
+        try commit(change)
     }
     func pin(_ field: WorkflowField, enabled: Bool) {
-        guard let index = workflows.firstIndex(where: { $0.id == selectedID }) else { return }
-        if enabled { workflows[index].pinned.insert(field.id) } else { workflows[index].pinned.remove(field.id) }
-        do { try persist() } catch { self.error = error.localizedDescription }
+        var items = panelItems
+        if enabled && !items.contains(where: { $0.id == field.id }) { items.append(PanelFieldConfiguration(id: field.id)) }
+        if !enabled { items.removeAll { $0.id == field.id } }
+        do { try configurePanel(items) } catch { self.error = error.localizedDescription }
     }
     func choosePrompt(_ id: String) {
-        guard let index = workflows.firstIndex(where: { $0.id == selectedID }) else { return }
-        workflows[index].promptField = id
-        do { try persist() } catch { self.error = error.localizedDescription }
+        do { try commit(WorkflowChange(kind: .prompt, label: "提示词入口", before: selected?.promptField.map(JSONValue.string) ?? .null, after: id.isEmpty ? .null : .string(id))) }
+        catch { self.error = error.localizedDescription }
     }
     func removeWorkflow(_ id: UUID) {
         workflows.removeAll { $0.id == id }
@@ -213,9 +226,83 @@ private struct SavedState: Codable {
         do { try persist() } catch { self.error = error.localizedDescription }
     }
     func setRandomSeed(_ fieldID: String, enabled: Bool) throws {
+        let before = selected?.randomSeedFields ?? []
+        var after = before
+        if enabled { after.insert(fieldID) } else { after.remove(fieldID) }
+        try commit(WorkflowChange(kind: .randomSeeds, label: "随机种子", before: .array(before.sorted().map(JSONValue.string)), after: .array(after.sorted().map(JSONValue.string))))
+    }
+    func configurePanel(_ items: [PanelFieldConfiguration]) throws {
+        guard Set(items.map(\.id)).count == items.count else { throw WorkflowError.invalid("面板不能重复添加同一个参数。") }
+        for item in items {
+            guard let field = canvas?.fields.first(where: { $0.id == item.id }) else { throw WorkflowError.invalid("找不到面板参数。") }
+            try item.validate(for: field)
+        }
+        try commit(WorkflowChange(kind: .panel, label: "应用面板", before: JSONValue(data: JSONEncoder().encode(panelItems)), after: JSONValue(data: JSONEncoder().encode(items))))
+    }
+    private func applying(_ change: WorkflowChange, value: JSONValue, to item: SavedWorkflow) throws -> SavedWorkflow {
+        var item = item
+        switch change.kind {
+        case .parameter:
+            guard let id = change.fieldID else { throw WorkflowError.invalid("编辑记录不完整。") }
+            let info = try objectInfoData.map { try ObjectInfo(data: $0) }
+            var graph = try WorkflowCanvas(data: item.data, objectInfo: info, widgetOrder: item.canvasWidgetOrder ?? [:])
+            try graph.update(fieldID: id, value: value)
+            item.data = try graph.data(); item.canvasWidgetOrder = graph.widgetOrder
+            item.editorDrafts?.removeValue(forKey: id)
+        case .panel:
+            item.panelItems = try JSONDecoder().decode([PanelFieldConfiguration].self, from: value.data())
+            item.pinned = Set(item.panelItems?.map(\.id) ?? [])
+        case .prompt: item.promptField = value.stringValue
+        case .randomSeeds: item.randomSeedFields = Set(value.arrayValue?.compactMap(\.stringValue) ?? [])
+        }
+        item.editedAt = Date()
+        return item
+    }
+    private func commit(_ change: WorkflowChange) throws {
+        guard let index = workflows.firstIndex(where: { $0.id == selectedID }) else { throw WorkflowError.invalid("先选择工作流。") }
+        let previous = workflows[index]
+        var item = try applying(change, value: change.after, to: previous)
+        var journal = item.journal ?? WorkflowJournal(); journal.record(change); item.journal = journal
+        workflows[index] = item
+        do { try persist(); try loadWorkflow(item) } catch { workflows[index] = previous; try? loadWorkflow(previous); throw error }
+    }
+    func undoEdit() { replay(redo: false) }
+    func redoEdit() { replay(redo: true) }
+    private func replay(redo: Bool) {
+        guard !busy, let index = workflows.firstIndex(where: { $0.id == selectedID }) else { return }
+        let previous = workflows[index]
+        var journal = previous.journal ?? WorkflowJournal()
+        guard let change = redo ? journal.redo() : journal.undo() else { return }
+        do {
+            var item = try applying(change, value: redo ? change.after : change.before, to: previous)
+            item.journal = journal; workflows[index] = item
+            try persist(); try loadWorkflow(item)
+        } catch { workflows[index] = previous; try? loadWorkflow(previous); self.error = error.localizedDescription }
+    }
+    func editorDraft(_ fieldID: String) -> String? { selected?.editorDrafts?[fieldID] }
+    func saveEditorDraft(_ fieldID: String, text: String?) {
         guard let index = workflows.firstIndex(where: { $0.id == selectedID }) else { return }
-        if enabled { workflows[index].randomSeedFields.insert(fieldID) } else { workflows[index].randomSeedFields.remove(fieldID) }
-        try persist()
+        if workflows[index].editorDrafts == nil { workflows[index].editorDrafts = [:] }
+        workflows[index].editorDrafts?[fieldID] = text
+        scheduleDraftSave()
+    }
+    func setChatDraft(_ text: String) {
+        guard let index = workflows.firstIndex(where: { $0.id == selectedID }), workflows[index].chatDraft != text else { return }
+        workflows[index].chatDraft = text; scheduleDraftSave()
+    }
+    func saveViewport(_ viewport: CanvasViewport, workflowID: UUID?) {
+        guard viewport.valid, let index = workflows.firstIndex(where: { $0.id == workflowID }) else { return }
+        workflows[index].viewport = viewport; scheduleDraftSave()
+    }
+    private func scheduleDraftSave() {
+        draftSaveTask?.cancel()
+        draftSaveTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 750_000_000); try Task.checkCancellation(); self?.saveDraftsNow() } catch { }
+        }
+    }
+    func saveDraftsNow() {
+        draftSaveTask?.cancel(); draftSaveTask = nil
+        do { try persist() } catch { self.error = "草稿保存失败：\(error.localizedDescription)" }
     }
     func connect(config: ServerConfig, password: String) async {
         busy = true; defer { busy = false }
@@ -226,6 +313,7 @@ private struct SavedState: Codable {
             let metadata = try await client.objectInfo()
             _ = try ObjectInfo(data: metadata)
             try KeychainStore.savePassword(password, for: config.passwordKey)
+            if server != config { bufferedEvents = [] }
             server = config; objectInfoData = metadata
             if let item = selected { try loadWorkflow(item) }
             connectionStatus = "已连接"
@@ -290,15 +378,18 @@ private struct SavedState: Codable {
             }
             let data = try draft.promptData()
             let text = message ?? currentPromptField?.value.displayValue ?? "运行工作流"
-            let job = GenerationJob(name: selected?.name ?? "工作流", message: text, promptData: data, server: config)
+            var job = GenerationJob(name: selected?.name ?? "工作流", message: text, promptData: data, server: config)
+            job.workflowID = selectedID; job.execution = ExecutionTrace()
             jobs.append(job); jobID = job.id
             try persist() // Durably record BEFORE network submission, never auto-retry POST.
+            resumeMonitoring()
             let client = try makeClient(config)
             let extra = try JSONSerialization.data(withJSONObject: ["ios_request_id": job.id.uuidString])
             submissionAttempted = true
             let response = try await client.submit(prompt: data, clientID: clientID, extraData: extra)
             if let index = jobs.firstIndex(where: { $0.id == job.id }) {
                 jobs[index].promptID = response.promptID; jobs[index].state = "排队中"; try persist()
+                replayBufferedEvents(promptID: response.promptID, config: config)
             }
             activeTab = 0; resumeMonitoring()
         } catch {
@@ -308,10 +399,12 @@ private struct SavedState: Codable {
                     jobs[index].state = "未提交"
                     jobs[index].finished = true
                     jobs[index].detail = "任务未发送：\(error.localizedDescription)"
+                    jobs[index].execution?.receive(type: "execution_interrupted", node: nil, message: "任务未发送：\(error.localizedDescription)")
                 } else {
                     jobs[index].state = rejected ? "提交失败" : (jobs[index].promptID == nil ? "提交状态待确认" : "已提交，等待查询")
                     jobs[index].finished = rejected
                     jobs[index].detail = error.localizedDescription
+                    if rejected { jobs[index].execution?.receive(type: "execution_error", node: nil, message: error.localizedDescription) }
                 }
                 try? persist()
                 if submissionAttempted && !rejected { resumeMonitoring() }
@@ -333,8 +426,9 @@ private struct SavedState: Codable {
             try edit(field, text: output.workflowInputPath)
         } catch { self.error = error.localizedDescription }
     }
-    func setBackground(_ image: UIImage) {
-        let ratio = min(1, 1600 / max(image.size.width, image.size.height))
+    func setBackground(_ image: UIImage, sourceDate: Date = Date()) {
+        backgroundRevision = UUID()
+        let ratio = min(1, 2400 / max(image.size.width, image.size.height))
         let size = CGSize(width: image.size.width * ratio, height: image.size.height * ratio)
         let renderer = UIGraphicsImageRenderer(size: size)
         let resized = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
@@ -342,16 +436,39 @@ private struct SavedState: Codable {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             guard let data = resized.jpegData(compressionQuality: 0.88) else { return }
             try data.write(to: root.appendingPathComponent("background.jpg"), options: .atomic)
-            background = resized
+            background = resized; backgroundDate = sourceDate; try persist()
         } catch { self.error = error.localizedDescription }
     }
-    func pauseMonitoring() {
+    private func updateGeneratedBackground() {
+        guard backgroundTask == nil,
+              let job = jobs.last(where: { $0.finished && $0.state == "已完成" && $0.date > (backgroundDate ?? .distantPast) && $0.outputs.contains(where: { ["png", "jpg", "jpeg", "webp", "heic"].contains(($0.filename as NSString).pathExtension.lowercased()) }) }),
+              let output = job.outputs.first(where: { ["png", "jpg", "jpeg", "webp", "heic"].contains(($0.filename as NSString).pathExtension.lowercased()) }) else { return }
+        let revision = backgroundRevision
+        backgroundTask = Task { [weak self] in
+            guard let self = self else { return }
+            var applied = false
+            defer { self.backgroundTask = nil; if applied { self.updateGeneratedBackground() } }
+            do {
+                let local = try await self.localMedia(output, job: job)
+                let image = await Task.detached(priority: .utility) { downsampledImage(local, maxPixelSize: 2400) }.value
+                try Task.checkCancellation()
+                guard self.backgroundRevision == revision, let image = image else { return }
+                self.setBackground(image, sourceDate: job.date)
+                applied = self.backgroundDate == job.date
+            } catch { /* Retain the current picture; retry on the next history refresh. */ }
+        }
+    }
+    func pauseMonitoring(markDisconnected: Bool = true) {
         monitor?.cancel(); monitor = nil; eventTask?.cancel(); eventTask = nil
+        if markDisconnected {
+            for index in jobs.indices where !jobs[index].finished { jobs[index].execution?.disconnect() }
+        }
         let client = eventClient; eventClient = nil
         Task { await client?.disconnectEvents() }
     }
     func resumeMonitoring() {
-        pauseMonitoring()
+        pauseMonitoring(markDisconnected: false)
+        updateGeneratedBackground()
         guard verificationPage == nil, jobs.contains(where: { !$0.finished }) else { return }
         monitor = Task { [weak self] in
             while !Task.isCancelled {
@@ -364,16 +481,40 @@ private struct SavedState: Codable {
         eventClient = client
         let eventsClientID = clientID
         eventTask = Task { [weak self] in
-            do {
-                for try await event in await client.events(clientID: eventsClientID) {
-                    guard !Task.isCancelled else { return }
-                    guard let self = self, let prompt = event.promptID,
-                          let index = self.jobs.firstIndex(where: { $0.promptID == prompt && $0.server.baseURL == config.baseURL && !$0.finished }) else { continue }
-                    if let value = event.value, let max = event.maximum, max > 0 { self.jobs[index].progress = min(1, value / max) }
-                    if event.type == "executing" || event.type == "progress" { self.jobs[index].state = "生成中" }
+            while !Task.isCancelled {
+                guard self?.jobs.contains(where: { !$0.finished && $0.server.baseURL == config.baseURL }) == true else { return }
+                do {
+                    for try await event in await client.events(clientID: eventsClientID) {
+                        guard !Task.isCancelled else { return }
+                        self?.receive(event, config: config)
+                    }
+                } catch {
+                    guard !Task.isCancelled, let self = self else { return }
+                    for index in self.jobs.indices where !self.jobs[index].finished && self.jobs[index].server.baseURL == config.baseURL { self.jobs[index].execution?.disconnect() }
                 }
-            } catch { /* History polling remains authoritative after socket loss. */ }
+                do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { return }
+            }
         }
+    }
+    private func receive(_ event: ComfyEvent, config: ServerConfig, bufferUnknown: Bool = true) {
+        guard let prompt = event.promptID else { return }
+        guard let index = jobs.firstIndex(where: { $0.promptID == prompt && $0.server.baseURL == config.baseURL && !$0.finished }) else {
+            if bufferUnknown && jobs.contains(where: { $0.promptID == nil && !$0.finished && $0.server.baseURL == config.baseURL }) {
+                bufferedEvents.append(event); if bufferedEvents.count > 200 { bufferedEvents.removeFirst(bufferedEvents.count - 200) }
+            }
+            return
+        }
+        var trace = jobs[index].execution ?? ExecutionTrace()
+        trace.receive(type: event.type, node: event.nodeID, nodes: event.nodes, value: event.value, maximum: event.maximum, message: event.message)
+        jobs[index].execution = trace
+        if let fraction = trace.fraction { jobs[index].progress = fraction }
+        if trace.phase == .running { jobs[index].state = "生成中" }
+        if let detail = trace.detail { jobs[index].detail = detail }
+    }
+    private func replayBufferedEvents(promptID: String, config: ServerConfig) {
+        let events = bufferedEvents.filter { $0.promptID == promptID }
+        bufferedEvents.removeAll { $0.promptID == promptID }
+        for event in events { receive(event, config: config, bufferUnknown: false) }
     }
     func poll() async {
         for job in jobs.filter({ !$0.finished && $0.server.baseURL != verificationRequired?.baseURL }) {
@@ -387,6 +528,7 @@ private struct SavedState: Codable {
                 guard let recoveredIndex = jobs.firstIndex(where: { $0.id == job.id && !$0.finished }) else { continue }
                 if jobs[recoveredIndex].promptID != prompt {
                     jobs[recoveredIndex].promptID = prompt
+                    replayBufferedEvents(promptID: prompt, config: job.server)
                     try persist()
                 }
                 if let history = try await client.history(promptID: prompt) {
@@ -396,6 +538,21 @@ private struct SavedState: Codable {
                     jobs[index].finished = history.completed || history.failed
                     jobs[index].state = history.failed ? "生成失败" : (history.completed ? "已完成" : "生成中")
                     jobs[index].detail = history.errorMessage
+                    var trace = jobs[index].execution ?? ExecutionTrace()
+                    if let record = try? JSONValue(data: history.rawData) {
+                        for entry in record["status"]?["messages"]?.arrayValue ?? [] {
+                            guard let pair = entry.arrayValue, pair.count > 1, let type = pair[0].stringValue else { continue }
+                            guard ["execution_cached", "execution_error", "execution_interrupted", "execution_success"].contains(type) else { continue }
+                            let body = pair[1]
+                            trace.receive(type: type, node: body["node_id"]?.displayValue ?? body["node"]?.stringValue,
+                                          nodes: (body["nodes"]?.arrayValue ?? body["executed"]?.arrayValue ?? []).map(\.displayValue), message: history.errorMessage)
+                        }
+                        trace.completedNodes.formUnion(record["outputs"]?.objectValue?.keys.map { $0 } ?? [])
+                        if let failed = trace.failedNode { trace.completedNodes.remove(failed) }
+                    }
+                    if history.failed { trace.receive(type: "execution_error", node: trace.failedNode, message: history.errorMessage) }
+                    else if history.completed { trace.receive(type: "execution_success", node: nil) }
+                    jobs[index].execution = trace
                     if history.completed { jobs[index].progress = 1 }
                 } else {
                     let queue = try await client.queue()
@@ -412,6 +569,7 @@ private struct SavedState: Codable {
                 if let index = jobs.firstIndex(where: { $0.id == job.id && !$0.finished }) { jobs[index].detail = "查询未完成，恢复连接后继续查询：\(error.localizedDescription)" }
             }
         }
+        updateGeneratedBackground()
     }
     func cancel(_ job: GenerationJob) async {
         guard let prompt = job.promptID else { error = "提交结果未知，请先检查服务器队列，避免重复生成。"; return }
@@ -419,7 +577,7 @@ private struct SavedState: Codable {
             let result = try await makeClient(job.server).cancelPrompt(promptID: prompt)
             switch result {
             case .removedFromQueue:
-                if let i = jobs.firstIndex(where: { $0.id == job.id }) { jobs[i].finished = true; jobs[i].state = "已取消"; try persist() }
+                if let i = jobs.firstIndex(where: { $0.id == job.id }) { jobs[i].finished = true; jobs[i].state = "已取消"; jobs[i].execution?.receive(type: "execution_interrupted", node: nil, message: "已取消排队"); try persist() }
             case .alreadyFinished: await poll()
             case .runningCannotSafelyInterrupt: error = "任务已在运行。为避免中断其他人的任务，请到 ComfyUI 页面停止这个任务。"
             }

@@ -18,13 +18,16 @@ struct WorkflowCanvasView: View {
             ZStack(alignment: .top) {
                 Color(red: 0.082, green: 0.165, blue: 0.2).ignoresSafeArea()
                 if let graph = store.canvas {
+                    let workflowID = store.selectedID
                     CanvasSurface(graph: graph, selected: selected, command: command,
                                   bottomInset: node == nil ? 94 : min(geometry.size.height * 0.43, 350) + 80,
-                                  selection: { selected = $0 }, zoomChanged: { zoom = $0 })
+                                  trace: store.canvasJob?.execution, savedViewport: store.selected?.viewport,
+                                  selection: { selected = $0 }, zoomChanged: { zoom = $0 }, viewportChanged: { store.saveViewport($0, workflowID: workflowID) })
                         .ignoresSafeArea(edges: .bottom)
                 }
                 VStack(spacing: 0) {
                     header.padding(.horizontal, 16).padding(.top, 8)
+                    if let job = store.canvasJob { executionBanner(job).padding(.horizontal, 16).padding(.top, 8) }
                     Spacer(minLength: 12)
                     controls.padding(.bottom, 14)
                     if let node = node { inspector(node).frame(height: min(geometry.size.height * 0.43, 350)).padding(.horizontal, 12).padding(.bottom, 8) }
@@ -63,12 +66,30 @@ struct WorkflowCanvasView: View {
     }
     private var controls: some View {
         HStack(spacing: 2) {
+            Button { store.undoEdit() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 40, height: 44) }.disabled(!store.canUndo || store.busy).accessibilityLabel("撤销修改")
+            Button { store.redoEdit() } label: { Image(systemName: "arrow.uturn.forward").frame(width: 40, height: 44) }.disabled(!store.canRedo || store.busy).accessibilityLabel("重做修改")
             Button { selected = nil; command = CanvasCommand(action: .fit) } label: { Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 48, height: 44) }.accessibilityLabel("显示整个工作流")
             Rectangle().fill(.white.opacity(0.15)).frame(width: 1, height: 18)
             Button { command = CanvasCommand(action: .zoom(0.75)) } label: { Image(systemName: "minus").frame(width: 44, height: 44) }.accessibilityLabel("缩小")
             Text("\(Int(zoom * 100))%").font(.system(size: 12, weight: .medium, design: .monospaced)).frame(width: 50).foregroundColor(.white.opacity(0.65)).accessibilityLabel("缩放百分之 \(Int(zoom * 100))")
             Button { command = CanvasCommand(action: .zoom(1.33)) } label: { Image(systemName: "plus").frame(width: 44, height: 44) }.accessibilityLabel("放大")
         }.padding(4).glass(30).overlay(Capsule().stroke(.white.opacity(0.16), lineWidth: 0.5)).foregroundColor(.white)
+    }
+    private func executionBanner(_ job: GenerationJob) -> some View {
+        let trace = job.execution ?? ExecutionTrace()
+        let target = trace.failedNode ?? trace.activeNode
+        let type = store.canvas?.nodes.first { $0.id == target }?.type ?? "节点"
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 10) {
+                Circle().fill(trace.phase == .failed || trace.phase == .interrupted ? Color.red : Color.mint).frame(width: 6, height: 6)
+                Text(trace.phase == .disconnected ? "正在恢复实时连接" : (target.map { "\(type)  #\($0)" } ?? job.state)).font(.caption.weight(.medium)).lineLimit(1)
+                Spacer(minLength: 0)
+                if let target = target { Button { selected = target; command = CanvasCommand(action: .focus(target)) } label: { Image(systemName: "scope").frame(width: 34, height: 30) }.accessibilityLabel("定位运行或出错节点") }
+            }
+            if let fraction = trace.fraction, trace.phase == .running { ProgressView(value: fraction).tint(.mint) }
+            if let detail = trace.detail { Text(detail).font(.caption2).foregroundColor(.red).lineLimit(2) }
+            else { Text(trace.phase == .disconnected ? "历史结果仍会继续查询" : "已执行 \(trace.completedNodes.count) · 缓存 \(trace.cachedNodes.count)\(job.finished ? "" : " · 修改参数用于下一次生成")").font(.system(size: 10)).foregroundColor(.secondary) }
+        }.padding(.horizontal, 14).padding(.vertical, 9).glass(16)
     }
     private func inspector(_ node: CanvasNode) -> some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -128,14 +149,18 @@ private struct CanvasSurface: UIViewRepresentable {
     let selected: String?
     let command: CanvasCommand
     let bottomInset: CGFloat
+    let trace: ExecutionTrace?
+    let savedViewport: CanvasViewport?
     let selection: (String?) -> Void
     let zoomChanged: (Double) -> Void
+    let viewportChanged: (CanvasViewport) -> Void
     func makeUIView(context: Context) -> GraphCanvasUIView {
         let view = GraphCanvasUIView(); view.onSelection = selection; view.onZoom = zoomChanged; return view
     }
     func updateUIView(_ view: GraphCanvasUIView, context: Context) {
         view.onSelection = selection; view.onZoom = zoomChanged
-        view.update(graph: graph, selected: selected, bottomInset: bottomInset, command: command)
+        view.onViewport = viewportChanged
+        view.update(graph: graph, selected: selected, bottomInset: bottomInset, command: command, trace: trace, savedViewport: savedViewport)
     }
 }
 
@@ -143,6 +168,7 @@ private struct CanvasSurface: UIViewRepresentable {
 final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
     var onSelection: ((String?) -> Void)?
     var onZoom: ((Double) -> Void)?
+    var onViewport: ((CanvasViewport) -> Void)?
     private var graph: WorkflowCanvas?
     private var byID: [String: CanvasNode] = [:]
     private var selected: String?
@@ -156,6 +182,8 @@ final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
     private var lastSize = CGSize.zero
     private var miniRect = CGRect.zero
     private var graphBounds = CGRect.zero
+    private var trace: ExecutionTrace?
+    private var restoredViewport: CanvasViewport?
     private let teal = UIColor(red: 0.53, green: 0.83, blue: 0.8, alpha: 1)
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -167,8 +195,10 @@ final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
         accessibilityLabel = "工作流画布"; accessibilityHint = "可用顶部搜索按钮选择节点并编辑参数"
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func update(graph: WorkflowCanvas, selected: String?, bottomInset: CGFloat, command: CanvasCommand) {
+    func update(graph: WorkflowCanvas, selected: String?, bottomInset: CGFloat, command: CanvasCommand, trace: ExecutionTrace?, savedViewport: CanvasViewport?) {
         self.graph = graph; self.selected = selected; self.bottomInset = bottomInset
+        self.trace = trace
+        if !fitted { restoredViewport = savedViewport }
         byID = Dictionary(uniqueKeysWithValues: graph.nodes.map { ($0.id, $0) })
         related = Set(graph.links.filter { $0.source == selected || $0.target == selected }.flatMap { [$0.source, $0.target] })
         if let selected = selected { related.insert(selected) }
@@ -183,12 +213,20 @@ final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
         super.layoutSubviews()
         if bounds.size != lastSize {
             let old = lastSize; lastSize = bounds.size
-            if !fitted { fit(); fitted = true }
+            if !fitted {
+                fit()
+                if let saved = restoredViewport, saved.valid {
+                    scale = CGFloat(saved.zoom)
+                    camera = CGPoint(x: viewport.midX - CGFloat(saved.x) * scale, y: viewport.midY - CGFloat(saved.y) * scale)
+                    reportZoom()
+                }
+                fitted = true
+            }
             else { camera.x += (bounds.width - old.width) / 2; camera.y += (bounds.height - old.height) / 2 }
             setNeedsDisplay()
         }
     }
-    private var viewport: CGRect { CGRect(x: 18, y: 100, width: max(1, bounds.width - 36), height: max(100, bounds.height - bottomInset - 116)) }
+    private var viewport: CGRect { let top: CGFloat = trace == nil ? 100 : 170; return CGRect(x: 18, y: top, width: max(1, bounds.width - 36), height: max(100, bounds.height - bottomInset - top - 16)) }
     private func rect(_ node: CanvasNode) -> CGRect { CGRect(x: node.x, y: node.y, width: node.width, height: node.height) }
     private func fit() {
         guard !graphBounds.isNull, graphBounds.width > 0 else { return }
@@ -208,6 +246,12 @@ final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
             camera = CGPoint(x: viewport.midX - rect(node).midX * scale, y: viewport.midY - rect(node).midY * scale)
             reportZoom()
         }
+        reportViewport()
+    }
+    private func reportViewport() {
+        guard fitted, scale > 0 else { return }
+        let value = CanvasViewport(x: Double((viewport.midX - camera.x) / scale), y: Double((viewport.midY - camera.y) / scale), zoom: Double(scale))
+        DispatchQueue.main.async { [weak self] in self?.onViewport?(value) }
     }
     private func reportZoom() { let value = Double(scale); DispatchQueue.main.async { [weak self] in self?.onZoom?(value) } }
     private func zoom(by factor: CGFloat, anchor: CGPoint) {
@@ -218,14 +262,15 @@ final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
     @objc private func pan(_ gesture: UIPanGestureRecognizer) {
         let delta = gesture.translation(in: self); camera.x += delta.x; camera.y += delta.y
         gesture.setTranslation(.zero, in: self); setNeedsDisplay()
+        if gesture.state == .ended || gesture.state == .cancelled { reportViewport() }
     }
-    @objc private func pinch(_ gesture: UIPinchGestureRecognizer) { zoom(by: gesture.scale, anchor: gesture.location(in: self)); gesture.scale = 1 }
+    @objc private func pinch(_ gesture: UIPinchGestureRecognizer) { zoom(by: gesture.scale, anchor: gesture.location(in: self)); gesture.scale = 1; if gesture.state == .ended || gesture.state == .cancelled { reportViewport() } }
     @objc private func tap(_ gesture: UITapGestureRecognizer) {
         let p = gesture.location(in: self)
         if miniRect.contains(p), graphBounds.width > 0 {
             let world = CGPoint(x: graphBounds.minX + (p.x - miniRect.minX) / miniRect.width * graphBounds.width,
                                 y: graphBounds.minY + (p.y - miniRect.minY) / miniRect.height * graphBounds.height)
-            camera = CGPoint(x: viewport.midX - world.x * scale, y: viewport.midY - world.y * scale); setNeedsDisplay(); return
+            camera = CGPoint(x: viewport.midX - world.x * scale, y: viewport.midY - world.y * scale); setNeedsDisplay(); reportViewport(); return
         }
         let world = CGPoint(x: (p.x - camera.x) / scale, y: (p.y - camera.y) / scale)
         let hit = graph?.nodes.reversed().first { rect($0).insetBy(dx: -4 / scale, dy: -4 / scale).contains(world) }
@@ -255,7 +300,7 @@ final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
             let path = UIBezierPath(); path.move(to: p)
             path.addCurve(to: q, controlPoint1: CGPoint(x: p.x + bend, y: p.y), controlPoint2: CGPoint(x: q.x - bend, y: q.y))
             guard path.bounds.insetBy(dx: -4, dy: -4).intersects(visible) else { continue }
-            let active = selected == link.source || selected == link.target
+            let active = selected == link.source || selected == link.target || trace?.activeNode == link.source || trace?.activeNode == link.target
             color(link.type).withAlphaComponent(active ? 0.85 : (selected == nil ? 0.28 : 0.08)).setStroke()
             path.lineWidth = (active ? 1.5 : 0.9) / max(0.4, scale); path.stroke()
         }
@@ -273,9 +318,13 @@ final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
         }
     }
     private func drawNode(_ node: CanvasNode, ctx: CGContext) {
-        let r = rect(node), accent = color(node.type), active = node.id == selected
+        let running = trace?.phase == .running && trace?.activeNode == node.id
+        let failed = trace?.failedNode == node.id
+        let completed = trace?.completedNodes.contains(node.id) == true
+        let cached = trace?.cachedNodes.contains(node.id) == true
+        let r = rect(node), accent = failed ? UIColor.systemRed : (running || completed ? teal : color(node.type)), active = node.id == selected || running || failed
         ctx.saveGState()
-        ctx.setAlpha(selected == nil || related.contains(node.id) ? (node.bypassed ? 0.5 : 1) : 0.42)
+        ctx.setAlpha(selected == nil || related.contains(node.id) || running || failed ? (node.bypassed ? 0.5 : 1) : 0.42)
         let path = UIBezierPath(roundedRect: r, cornerRadius: min(14, r.height / 3))
         if active { ctx.setShadow(offset: .zero, blur: 18 / max(0.3, scale), color: accent.withAlphaComponent(0.23).cgColor) }
         UIColor(red: 0.12, green: 0.225, blue: 0.265, alpha: 1).setFill(); path.fill(); ctx.setShadow(offset: .zero, blur: 0)
@@ -286,6 +335,10 @@ final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
         if scale > 0.19 {
             text(node.type, in: CGRect(x: r.minX + 13, y: r.minY + 10, width: r.width - 55, height: 21), size: 12, weight: .semibold, color: .white.withAlphaComponent(0.92))
             text("#\(node.id)", in: CGRect(x: r.maxX - 49, y: r.minY + 11, width: 39, height: 18), size: 9, color: .white.withAlphaComponent(0.38), right: true)
+        }
+        if running || failed || completed || cached {
+            accent.withAlphaComponent(running || failed ? 1 : 0.55).setFill()
+            ctx.fill(CGRect(x: r.minX + 12, y: r.maxY - 4, width: (r.width - 24) * (running ? CGFloat(trace?.fraction ?? 0.08) : 1), height: 2))
         }
         if scale > 0.44 && r.height > 90 {
             let slots = max(node.inputs.count, node.outputs.count)

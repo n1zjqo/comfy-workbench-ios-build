@@ -59,6 +59,7 @@ public struct ComfyOutput: Codable, Hashable, Identifiable, Sendable {
     public var subfolder: String
     public var type: String
     public var nodeID: String?
+    public var nodes: [String] = []
     public var kind: String
     public var id: String { [nodeID ?? "", type, subfolder, filename].joined(separator: "|") }
     public var workflowInputPath: String { subfolder.isEmpty ? filename : "\(subfolder)/\(filename)" }
@@ -557,7 +558,7 @@ public actor ComfyClient {
         return results.filter { seen.insert($0.id).inserted }
     }
 
-    private static func parseEvent(_ message: URLSessionWebSocketTask.Message) throws -> ComfyEvent? {
+    static func parseEvent(_ message: URLSessionWebSocketTask.Message) throws -> ComfyEvent? {
         switch message {
         case .string(let string):
             let bytes = Data(string.utf8)
@@ -566,10 +567,11 @@ public actor ComfyClient {
             let data = envelope["data"] as? [String: Any] ?? [:]
             let status = data["status"] as? [String: Any] ?? data
             let info = status["exec_info"] as? [String: Any] ?? [:]
-            let nodeID = data["node"] as? String ?? data["node_id"] as? String
+            let nodeID = data["node"] as? String ?? data["node_id"] as? String ?? (data["node"] as? NSNumber)?.stringValue ?? (data["node_id"] as? NSNumber)?.stringValue
             var event = ComfyEvent(type: type)
             event.promptID = data["prompt_id"] as? String
             event.nodeID = nodeID
+            event.nodes = ((data["nodes"] ?? data["executed"]) as? [Any] ?? []).compactMap { ($0 as? String) ?? ($0 as? NSNumber)?.stringValue }
             event.value = (data["value"] as? NSNumber)?.doubleValue
             event.maximum = (data["max"] as? NSNumber)?.doubleValue
             event.queueRemaining = (info["queue_remaining"] as? NSNumber)?.intValue
