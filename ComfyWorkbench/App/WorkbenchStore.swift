@@ -158,6 +158,14 @@ private struct SavedState: Codable {
             }
             // Application display configuration is separate from node data.
             item.pinned = Set(editable.filter { ["text", "prompt", "prompts", "seed", "steps", "cfg", "width", "height", "image", "video", "audio"].contains($0.name) }.map(\.id))
+            if !graph.originalLayout {
+                let api = try WorkflowDocument(data: data, objectInfo: info)
+                item.pinned = Set(api.applicationFields().map(\.id))
+            }
+            if item.pinned.isEmpty { item.pinned = Set(editable.map(\.id)) }
+            if graph.nodes.contains(where: { $0.type == "RayPromptQueue" }) {
+                item.pinned.formUnion(editable.filter { $0.nodeType == "RayPromptQueue" || $0.nodeType.hasPrefix("Primitive") }.map(\.id))
+            }
             workflows.append(item); selectedID = item.id; try loadWorkflow(item)
             try persist(); activeTab = 1
             importStatus = "已导入：\(name)"
