@@ -14,8 +14,8 @@ struct WorkflowPage: View {
     @State private var search = ""
     @State private var pendingDelete: UUID?
     var fields: [WorkflowField] {
-        guard let doc = store.document else { return [] }
-        let base = allParameters ? doc.fields : doc.fields.filter { store.selected?.pinned.contains($0.id) == true }
+        let available = store.canvas?.fields ?? []
+        let base = allParameters ? available : available.filter { store.selected?.pinned.contains($0.id) == true }
         guard !search.isEmpty else { return base }
         return base.filter { "\($0.name) \($0.nodeType) \($0.nodeID)".localizedCaseInsensitiveContains(search) }
     }
@@ -42,17 +42,27 @@ struct WorkflowPage: View {
                 else {
                     workflowSelector
                     HStack(spacing: 12) {
-                        Button { graph = true } label: { Label("节点关系", systemImage: "point.3.connected.trianglepath.dotted").font(.caption).frame(minHeight: 44) }
+                        Button { graph = true } label: { Label("打开画布", systemImage: "point.3.connected.trianglepath.dotted").font(.caption).frame(minHeight: 44) }.disabled(store.canvas == nil)
                         Spacer()
                         Button { manageFields = true } label: { Label("配置面板", systemImage: "slider.horizontal.3").font(.caption).frame(minHeight: 44) }
                         Menu {
                             Button("导出 API JSON") {
-                                do { exportFile = WorkflowFile(data: try store.document?.promptData(prettyPrinted: true) ?? Data()); exporting = true }
+                                do { if let doc = store.document { exportFile = WorkflowFile(data: try doc.promptData(prettyPrinted: true)); exporting = true } }
                                 catch { store.error = error.localizedDescription }
-                            }
+                            }.disabled(store.document == nil)
+                            Button("导出画布 JSON") {
+                                do { if let canvas = store.canvas { exportFile = WorkflowFile(data: try canvas.exportData()); exporting = true } }
+                                catch { store.error = error.localizedDescription }
+                            }.disabled(store.canvas?.originalLayout != true)
                             Button("删除此应用", role: .destructive) { pendingDelete = store.selectedID }
                         } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }.accessibilityLabel("应用操作")
                     }.foregroundColor(Palette.paper)
+                    if let issue = store.canvasRunIssue {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(issue).font(.caption).foregroundColor(.secondary)
+                            Button("连接并检查运行条件") { Task { await store.prepareCanvas() } }.frame(minHeight: 44).disabled(store.busy)
+                        }.padding(16).glass(18)
+                    }
                     Picker("参数范围", selection: $allParameters) { Text("应用参数").tag(false); Text("全部参数").tag(true) }.pickerStyle(.segmented)
                     if allParameters { TextField("搜索参数或节点", text: $search).padding(12).background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12)) }
                     if fields.isEmpty { Text("点“配置面板”选择你常用的参数。全部参数仍然可以查看。").font(.subheadline).foregroundColor(.secondary).padding(.vertical, 25) }
@@ -62,10 +72,10 @@ struct WorkflowPage: View {
                             Divider().padding(.leading, 16)
                         }
                     }.background(Palette.ink.opacity(0.92), in: RoundedRectangle(cornerRadius: 20)).clipShape(RoundedRectangle(cornerRadius: 20))
-                    if let count = store.document?.fields.count { Text("共 \(count) 个可编辑参数。连接保持原样；要修改连接的值，请编辑其上游节点。").font(.caption).foregroundColor(.secondary) }
+                    if let count = store.canvas?.fields.count { Text("共 \(count) 个参数。也可以打开画布，点击节点编辑。").font(.caption).foregroundColor(.secondary) }
                     Button { Task { await store.submit() } } label: {
                         HStack { if store.busy { ProgressView() }; Text("生成作品").font(.headline); Spacer(); Image(systemName: "sparkles") }.padding(.horizontal, 20).frame(height: 54)
-                    }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink).disabled(store.busy)
+                    }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink).disabled(store.busy || store.document == nil)
                 }
             }.padding(24).padding(.bottom, 12)
         }
@@ -83,7 +93,7 @@ struct WorkflowPage: View {
         .sheet(isPresented: $browsingServer) { ServerWorkflowLibrary() }
         .fileExporter(isPresented: $exporting, document: exportFile, contentType: .json, defaultFilename: store.selected?.name ?? "workflow") { result in if case .failure(let error) = result { store.error = error.localizedDescription } }
         .sheet(item: $editing) { FieldEditor(field: $0) }
-        .sheet(isPresented: $graph) { NodeMapView() }
+        .fullScreenCover(isPresented: $graph) { WorkflowCanvasView() }
         .sheet(isPresented: $manageFields) { PanelConfiguration() }
         .alert("删除这个应用？", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) {
             Button("取消", role: .cancel) { pendingDelete = nil }
@@ -100,7 +110,7 @@ struct WorkflowPage: View {
                 Image(systemName: "square.stack.3d.up").font(.system(size: 25)).frame(width: 50, height: 54).background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 15))
                 VStack(alignment: .leading, spacing: 5) {
                     Text(store.selected?.name ?? "选择工作流").font(.headline).multilineTextAlignment(.leading).lineLimit(2)
-                    Text("\(store.document?.nodes.count ?? 0) 个节点 · \(store.document?.connections.count ?? 0) 条连接").font(.caption).foregroundColor(.secondary)
+                    Text("\(store.canvas?.nodes.count ?? 0) 个节点 · \(store.canvas?.links.count ?? 0) 条连接").font(.caption).foregroundColor(.secondary)
                 }
                 Spacer(minLength: 0); Image(systemName: "chevron.down").font(.caption)
             }.padding(17).glass(23)
@@ -113,7 +123,7 @@ struct WorkflowPage: View {
             Text("导入 ComfyUI JSON，直接调整提示词、尺寸、种子和模型。常用参数可以固定在这里。").font(.body).foregroundColor(.secondary).lineSpacing(5)
             Button("从文件导入") { importing = true }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink).controlSize(.large).disabled(store.busy)
             Button { browsingServer = true } label: { Label("从服务器读取", systemImage: "server.rack").frame(minHeight: 44) }.disabled(store.busy)
-            Text("API 格式可以离线编辑；普通画布格式需要先连接服务器。遇到无法可靠转换的自定义节点时，会指出原因。").font(.caption).foregroundColor(.secondary)
+            Text("两种 JSON 都能离线打开和编辑。普通画布保留原始布局，API 格式自动布局；运行画布前需连接服务器检查节点。").font(.caption).foregroundColor(.secondary)
         }.padding(24).glass(28)
     }
 }
@@ -188,7 +198,7 @@ struct FieldEditor: View {
         .onAppear { randomSeed = store.selected?.randomSeedFields.contains(field.id) ?? false }
         .fileImporter(isPresented: $pickingFile, allowedContentTypes: [.image, .movie, .audio], allowsMultipleSelection: false) { result in
             if case .success(let urls) = result, let url = urls.first {
-                Task { await store.upload(url: url, field: field); if store.error == nil { text = store.document?.fields.first { $0.id == field.id }?.value.displayValue ?? text } else { error = store.error; store.error = nil } }
+                Task { await store.upload(url: url, field: field); if store.error == nil { text = store.canvas?.fields.first { $0.id == field.id }?.value.displayValue ?? text } else { error = store.error; store.error = nil } }
             } else if case .failure(let error) = result { self.error = error.localizedDescription }
         }
     }
@@ -206,7 +216,7 @@ struct PanelConfiguration: View {
                     }
                 }
                 Section(header: Text("固定在应用页的参数")) {
-                    ForEach(store.document?.fields ?? []) { field in
+                    ForEach(store.canvas?.fields ?? []) { field in
                         Toggle(isOn: Binding(get: { store.selected?.pinned.contains(field.id) ?? false }, set: { store.pin(field, enabled: $0) })) {
                             VStack(alignment: .leading, spacing: 4) { Text(field.name); Text("\(field.nodeType) #\(field.nodeID)").font(.caption).foregroundColor(.secondary) }
                         }
@@ -217,33 +227,6 @@ struct PanelConfiguration: View {
         }.navigationViewStyle(.stack)
     }
 }
-
-struct NodeMapView: View {
-    @EnvironmentObject var store: WorkbenchStore
-    @Environment(\.presentationMode) private var presentation
-    @State private var editing: WorkflowField?
-    var body: some View {
-        NavigationView {
-            ScrollView([.horizontal, .vertical]) {
-                VStack(alignment: .leading, spacing: 14) {
-                    ForEach(store.document?.nodes ?? []) { node in
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack { Text(node.classType).font(.headline); Spacer(); Text("#\(node.id)").font(.caption).foregroundColor(.secondary) }
-                            ForEach((store.document?.connections ?? []).filter { $0.targetNodeID == node.id }) { link in
-                                HStack { Image(systemName: "arrow.turn.down.right").foregroundColor(Palette.rose); Text("#\(link.sourceNodeID) : \(link.sourceOutputIndex)"); Image(systemName: "arrow.right"); Text(link.targetInputName) }.font(.caption)
-                            }
-                            ForEach((store.document?.fields ?? []).filter { $0.nodeID == node.id }) { field in
-                                Button { editing = field } label: { HStack { Text(field.name); Spacer(); Text(field.value.displayValue).lineLimit(1).foregroundColor(.secondary); Image(systemName: "pencil") }.font(.caption).frame(minHeight: 44) }.buttonStyle(.plain)
-                            }
-                        }.padding(16).frame(width: 320).background(Palette.ink, in: RoundedRectangle(cornerRadius: 14)).overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.18)))
-                    }
-                }.padding(20)
-            }.background(Color.black.opacity(0.2)).navigationTitle("节点关系").navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { presentation.wrappedValue.dismiss() } } }
-        }.navigationViewStyle(.stack).sheet(item: $editing) { FieldEditor(field: $0) }
-    }
-}
-
 
 struct ServerWorkflowLibrary: View {
     @EnvironmentObject var store: WorkbenchStore

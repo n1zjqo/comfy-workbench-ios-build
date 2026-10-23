@@ -10,6 +10,7 @@ struct SavedWorkflow: Codable, Identifiable {
     var pinned: Set<String> = []
     var promptField: String?
     var randomSeedFields: Set<String> = []
+    var canvasWidgetOrder: [String: [String]]?
 }
 
 struct GenerationJob: Codable, Identifiable {
@@ -40,6 +41,8 @@ private struct SavedState: Codable {
     @Published var workflows: [SavedWorkflow] = []
     @Published var selectedID: UUID?
     @Published var document: WorkflowDocument?
+    @Published var canvas: WorkflowCanvas?
+    @Published var canvasRunIssue: String?
     @Published var server: ServerConfig?
     @Published var jobs: [GenerationJob] = []
     @Published var error: String?
@@ -71,7 +74,7 @@ private struct SavedState: Codable {
             let state = try JSONDecoder().decode(SavedState.self, from: data)
             workflows = state.workflows; selectedID = state.selectedID; server = state.server
             jobs = state.jobs; clientID = state.clientID
-            if let item = selected { document = try WorkflowDocument(data: item.data) }
+            if let item = selected { try loadWorkflow(item) }
         } catch { if FileManager.default.fileExists(atPath: root.appendingPathComponent("state.json").path) { self.error = "本地数据读取失败，原文件已保留：\(error.localizedDescription)" } }
         if let data = try? Data(contentsOf: root.appendingPathComponent("background.jpg")) { background = UIImage(data: data) }
     }
@@ -83,8 +86,7 @@ private struct SavedState: Codable {
     func select(_ id: UUID) {
         do {
             guard let item = workflows.first(where: { $0.id == id }) else { return }
-            let info = try objectInfoData.map { try ObjectInfo(data: $0) }
-            document = try WorkflowDocument(data: item.data, objectInfo: info)
+            try loadWorkflow(item)
             selectedID = id; try persist()
         } catch { self.error = error.localizedDescription }
     }
@@ -137,45 +139,55 @@ private struct SavedState: Codable {
     }
 
     private func finishImport(data source: Data, name: String) async throws {
-            var data = try WorkflowImportData.normalized(source)
+            let data = try WorkflowImportData.normalized(source)
             importStatus = "正在解析工作流…"
             let json = try JSONValue(data: data)
-            if json["nodes"]?.arrayValue != nil {
-                guard let server = server else { throw WorkflowError.invalid("这是画布格式。请先连接 ComfyUI 读取节点定义，再导入；也可以先在 ComfyUI 中导出 API 格式。") }
-                let client = try makeClient(server)
-                let metadata = try await client.objectInfo()
-                objectInfoData = metadata
-                data = try UIWorkflowConverter.convert(data: data, objectInfoData: metadata)
-            }
             let info = try objectInfoData.map { try ObjectInfo(data: $0) }
-            let parsed = try WorkflowDocument(data: data, objectInfo: info)
-            var item = SavedWorkflow(name: name, data: try parsed.data())
+            let graph = try WorkflowCanvas(data: data, objectInfo: info)
+            var item = SavedWorkflow(name: name, data: data)
+            item.canvasWidgetOrder = graph.widgetOrder
+            let editable = graph.fields
             for node in json["nodes"]?.arrayValue ?? [] {
                 let type = node["type"]?.stringValue ?? ""
                 let controlIndex = type == "KSampler" ? 1 : (type == "KSamplerAdvanced" ? 2 : -1)
                 let widgets = node["widgets_values"]?.arrayValue ?? []
                 let positionalRandom = controlIndex >= 0 && controlIndex < widgets.count && widgets[controlIndex].stringValue == "randomize"
                 if node["widgets_values_named"]?["control_after_generate"]?.stringValue == "randomize" || positionalRandom, let id = node["id"]?.displayValue {
-                    item.randomSeedFields.formUnion(parsed.fields.filter { $0.nodeID == id && ["seed", "noise_seed"].contains($0.name) }.map(\.id))
+                    item.randomSeedFields.formUnion(editable.filter { $0.nodeID == id && ["seed", "noise_seed"].contains($0.name) }.map(\.id))
                 }
             }
             // Application display configuration is separate from node data.
-            item.pinned = Set(parsed.applicationFields().map(\.id))
-            if parsed.nodes.contains(where: { $0.classType == "RayPromptQueue" }) {
-                item.pinned.formUnion(parsed.fields.filter { $0.nodeType == "RayPromptQueue" || $0.nodeType.hasPrefix("Primitive") }.map(\.id))
-            }
-            workflows.append(item); selectedID = item.id; document = parsed
+            item.pinned = Set(editable.filter { ["text", "prompt", "prompts", "seed", "steps", "cfg", "width", "height", "image", "video", "audio"].contains($0.name) }.map(\.id))
+            workflows.append(item); selectedID = item.id; try loadWorkflow(item)
             try persist(); activeTab = 1
             importStatus = "已导入：\(name)"
     }
-    func saveDocument() throws {
-        guard let index = workflows.firstIndex(where: { $0.id == selectedID }), let document = document else { return }
-        workflows[index].data = try document.data(); try persist()
+    private func loadWorkflow(_ item: SavedWorkflow) throws {
+        let info = try objectInfoData.map { try ObjectInfo(data: $0) }
+        let graph = try WorkflowCanvas(data: item.data, objectInfo: info, widgetOrder: item.canvasWidgetOrder ?? [:])
+        canvas = graph; document = nil; canvasRunIssue = nil
+        if graph.originalLayout {
+            guard let metadata = objectInfoData else { canvasRunIssue = "画布已就绪，可离线编辑。连接服务器并检查节点定义后即可确认能否运行。"; return }
+            do { document = try WorkflowDocument(data: UIWorkflowConverter.convert(data: item.data, objectInfoData: metadata), objectInfo: info) }
+            catch { canvasRunIssue = "画布可编辑，暂不能运行：\(error.localizedDescription)" }
+        } else { document = try WorkflowDocument(data: item.data, objectInfo: info) }
+    }
+    func prepareCanvas() async {
+        guard !busy else { return }
+        guard let config = server else { activeTab = 3; return }
+        busy = true; defer { busy = false }
+        do {
+            objectInfoData = try await makeClient(config).objectInfo()
+            if let item = selected { try loadWorkflow(item) }
+        } catch { canvasRunIssue = error.localizedDescription; _ = noteVerification(error, config: config) }
     }
     func edit(_ field: WorkflowField, text: String) throws {
-        guard var draft = document else { return }
+        guard var draft = canvas, let index = workflows.firstIndex(where: { $0.id == selectedID }) else { throw WorkflowError.invalid("先选择工作流。") }
         try draft.update(fieldID: field.id, fromText: text)
-        document = draft; try saveDocument()
+        let previous = workflows[index]
+        workflows[index].data = try draft.data(); workflows[index].canvasWidgetOrder = draft.widgetOrder
+        do { try persist() } catch { workflows[index] = previous; throw error }
+        try loadWorkflow(workflows[index])
     }
     func pin(_ field: WorkflowField, enabled: Bool) {
         guard let index = workflows.firstIndex(where: { $0.id == selectedID }) else { return }
@@ -189,7 +201,7 @@ private struct SavedState: Codable {
     }
     func removeWorkflow(_ id: UUID) {
         workflows.removeAll { $0.id == id }
-        if selectedID == id { selectedID = nil; document = nil; if let first = workflows.first { select(first.id) } }
+        if selectedID == id { selectedID = nil; document = nil; canvas = nil; canvasRunIssue = nil; if let first = workflows.first { select(first.id) } }
         do { try persist() } catch { self.error = error.localizedDescription }
     }
     func setRandomSeed(_ fieldID: String, enabled: Bool) throws {
@@ -204,10 +216,10 @@ private struct SavedState: Codable {
             let client = ComfyClient(config: config, password: password)
             _ = try await client.systemStats()
             let metadata = try await client.objectInfo()
-            let info = try ObjectInfo(data: metadata)
+            _ = try ObjectInfo(data: metadata)
             try KeychainStore.savePassword(password, for: config.passwordKey)
             server = config; objectInfoData = metadata
-            if var draft = document { try? draft.applyObjectInfo(info); document = draft }
+            if let item = selected { try loadWorkflow(item) }
             connectionStatus = "已连接"
             if verificationRequired?.baseURL == config.baseURL { verificationRequired = nil }
             failedConnection = nil
@@ -253,7 +265,7 @@ private struct SavedState: Codable {
     func submit(message: String? = nil) async {
         guard !busy else { return }
         guard let config = server else { error = "先在“连接”中测试并保存 ComfyUI 地址。"; activeTab = 3; return }
-        guard var draft = document else { error = "先导入一个工作流。"; activeTab = 1; return }
+        guard var draft = document else { error = canvasRunIssue ?? "先导入一个工作流。"; activeTab = 1; return }
         busy = true; defer { busy = false }
         var jobID: UUID?
         var submissionAttempted = false
