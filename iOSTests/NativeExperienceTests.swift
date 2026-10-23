@@ -57,7 +57,7 @@ final class NativeExperienceTests: XCTestCase {
     }
 
     @MainActor func testChatImageUsesClippedAspectFillAcrossEntireViewport() throws {
-        let window = host(ArtworkBackground(image: testImage()))
+        let window = try host(ArtworkBackground(image: testImage()))
         defer { window.isHidden = true }
         let image = try XCTUnwrap(descendants(window).compactMap { $0 as? UIImageView }.first { $0.image != nil })
         XCTAssertEqual(image.contentMode, .scaleAspectFill)
@@ -69,25 +69,30 @@ final class NativeExperienceTests: XCTestCase {
     }
 
     @MainActor func testFittedPictureKeepsLandscapeRatioAndFrameFollowsPicture() throws {
-        let window = host(FittedArtwork(image: testImage()).ignoresSafeArea())
+        let window = try host(FittedArtwork(image: testImage()).ignoresSafeArea())
         defer { window.isHidden = true }
         let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        var rendered = false
         let render = UIGraphicsImageRenderer(bounds: window.bounds, format: format).image { _ in
-            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            rendered = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
         }
+        XCTAssertTrue(rendered, "The foreground test window must render before inspecting its pixels")
         let pixels = try rgba(render)
-        // A 2:1 red test picture fits to 347 x 173.5 in a 375 x 812 viewport.
-        XCTAssertGreaterThan(pixels(187, 406).0, 200)
-        XCTAssertLessThan(pixels(187, 250).0, 20)
-        XCTAssertLessThan(pixels(187, 560).0, 20)
-        XCTAssertLessThan(pixels(5, 406).0, 20)
-        XCTAssertGreaterThan(pixels(30, 406).0, 200)
+        // A 2:1 picture must remain centered, with black outside its fitted bounds.
+        let width = window.bounds.width, height = window.bounds.height
+        let pictureHeight = (width - 28) / 2
+        let x = Int(width / 2), y = Int(height / 2)
+        XCTAssertGreaterThan(pixels(x, y).0, 200)
+        XCTAssertLessThan(pixels(x, Int((height - pictureHeight) / 2 - 20)).0, 20)
+        XCTAssertLessThan(pixels(x, Int((height + pictureHeight) / 2 + 20)).0, 20)
+        XCTAssertLessThan(pixels(5, y).0, 20)
+        XCTAssertGreaterThan(pixels(30, y).0, 200)
         let attachment = XCTAttachment(image: render); attachment.name = "Native fitted artwork"; attachment.lifetime = .keepAlways; add(attachment)
     }
 
     @MainActor func testGlassUsesRealBlurAndCapsulePathStaysWithinBounds() throws {
         XCTAssertFalse(UIAccessibility.isReduceTransparencyEnabled, "Blur checks require the default simulator accessibility setting")
-        let window = host(ZStack {
+        let window = try host(ZStack {
             ArtworkBackground(image: testImage())
             Text("Test").foregroundColor(.white).frame(width: 330, height: 54).glass(30)
         })
@@ -108,9 +113,11 @@ final class NativeExperienceTests: XCTestCase {
             UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 400, height: 200))
         }
     }
-    @MainActor private func host<V: View>(_ view: V) -> UIWindow {
+    @MainActor private func host<V: View>(_ view: V) throws -> UIWindow {
         let controller = UIHostingController(rootView: view)
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 375, height: 812))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first { $0.activationState == .foregroundActive }, "Native rendering needs the test host's foreground scene")
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 375, height: 812)
         window.rootViewController = controller; window.makeKeyAndVisible()
         controller.view.frame = window.bounds; controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
