@@ -2,7 +2,7 @@
 
 面向 iPhone / iOS 15.0+ 的非官方原生 SwiftUI 客户端，参考 [Mimikkoro1/comfy-workbench-android](https://github.com/Mimikkoro1/comfy-workbench-android) 的直连 ComfyUI 与工作流参数映射思路，提供对话式生成、AI 应用式参数面板及右滑清屏。界面设计参考 [Anthropic frontend-design](https://github.com/anthropics/skills/blob/main/skills/frontend-design/SKILL.md)。
 
-当前是待编译和实机验收的源码工程，尚无已验证可安装的 IPA。结构检查通过不代表 Swift 编译、XCTest 或 iOS 运行验证通过；最终状态请查看对应构建日志。
+版本 **0.1.0（build 1）** 已通过 [GitHub Actions 构建](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/39949930078)：30 项 XCTest 零失败，并已生成 arm64 IPA。构建使用 Xcode 16.4 / iOS 18.5 SDK，部署目标为 iOS 15.0；下载后的 IPA 已独立核对 SHA-256、arm64 架构、Info.plist 与 Mach-O 最低系统版本。尚未完成 TrollStore 安装、iPhone XS / iOS 15 实机验收及真实 ComfyUI 服务器联调。详细出处与文件哈希见 `VALIDATION.md`。
 
 ## 功能
 
@@ -53,10 +53,10 @@ bash scripts/build-ipa.sh
 python3 scripts/verify-source.py
 ```
 
-结构检查仅验证文件、JSON、plist、源文件引用与构建配置。XCTest 包含 JSON/大整数/连接保持、画布转换、HTTP 错误、任务恢复、认证/路径和取消范围测试。测试是否通过以实际执行日志为准。
+结构检查仅验证文件、JSON、plist、源文件引用与构建配置。本次 CI 的 30 项 XCTest 已通过，覆盖 JSON/大整数/连接保持、画布转换、HTTP 错误、任务恢复、认证/路径和取消范围。自动化测试使用合成数据，不代替真实服务器和设备验收。
 
 ## 验证范围与限制
 
-仍需完成 Swift 编译、XCTest、IPA 生成及 iOS 15 实机验收，包括键盘与滑动、真实自定义节点转换、媒体播放和网络恢复。系统不支持的媒体格式可通过分享交给其他应用。原 Android 客户端的词库抽卡服务、自动局域网扫描、内置模板和全部主题尚未移植。
+仍需完成 TrollStore 安装、iPhone XS / iOS 15 实机启动和使用验收，以及真实 ComfyUI / GPU 服务器联调，包括键盘与滑动、自定义节点转换、媒体播放和网络恢复。系统不支持的媒体格式可通过分享交给其他应用。原 Android 客户端的词库抽卡服务、自动局域网扫描、内置模板和全部主题尚未移植。
 
 源码采用 GPL-3.0，完整许可见 `LICENSE`。Android 参考版本：`9c76c644895e50a9f3bc02e6c9fc2d13dffe4249`。本项目独立开发且非官方；原创图标不包含 ComfyUI 商标图案。
