@@ -427,10 +427,12 @@ private struct SavedState: Codable {
         } catch { self.error = error.localizedDescription }
     }
     func setBackground(_ image: UIImage, sourceDate: Date = Date()) {
+        guard image.size.width > 0, image.size.height > 0 else { return }
         backgroundRevision = UUID()
         let ratio = min(1, 2400 / max(image.size.width, image.size.height))
         let size = CGSize(width: image.size.width * ratio, height: image.size.height * ratio)
-        let renderer = UIGraphicsImageRenderer(size: size)
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
         let resized = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

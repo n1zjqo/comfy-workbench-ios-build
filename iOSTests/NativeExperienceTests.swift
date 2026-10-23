@@ -4,6 +4,21 @@ import UIKit
 @testable import ComfyWorkbench
 
 final class NativeExperienceTests: XCTestCase {
+    @MainActor func testBackgroundDoesNotMultiplyPixelsByRetinaScale() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 2600, height: 1300), format: format).image { context in
+            UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 2600, height: 1300))
+        }
+        let store = WorkbenchStore(storageURL: folder); store.setBackground(image)
+        let background = try XCTUnwrap(store.background?.cgImage)
+        XCTAssertEqual(background.width, 2400); XCTAssertEqual(background.height, 1200)
+        XCTAssertNil(store.error)
+        let restored = WorkbenchStore(storageURL: folder)
+        XCTAssertEqual(restored.background?.cgImage?.width, 2400)
+    }
+
     @MainActor func testStoreEditsUndoRedoAndDraftsSurviveRelaunch() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
