@@ -1,6 +1,23 @@
 # 验证记录
 
-## 当前版本：0.3.0（build 3）
+## 当前版本：0.4.0（build 4）
+
+- 构建出处：[GitHub Actions](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/39992839963)。
+- 构建源码提交：`d8b3aca0982fa7b906e1e6310a4b1ebcbb09ddfd`。
+- Xcode 16.4 / iOS 18.5 SDK，Release arm64 构建成功；Info.plist 与 Mach-O 最低系统版本均为 iOS 15.0。
+- 69 项核心/网络 XCTest 与 5 项 iOS 模拟器原生测试零失败。原生测试运行在 CI 已安装的 iOS 18.5 / iPhone 16 Pro 模拟器，不是 iOS 15 实机。
+- 原生测试覆盖聊天图片铺满、横图按原比例适配及外部留黑、UIVisualEffectView 模糊存在、胶囊闭合边界、Retina 背景像素上限、持久化撤销重做及参数/聊天/视口草稿恢复。原生渲染作像素断言，未将其冒充人工视觉验收。
+- 16 个 App Swift 源文件与 1 个原生测试文件引用检查通过；公开工程共 46 个文件，不含用户原始工作流、提示词、实机截图或私有服务器地址。
+- 下载后 ZIP CRC、SHA-256、版本、bundle ID、arm64 和 Mach-O 验证通过；CI ad-hoc 签名校验通过。bundle ID 继续为 `com.comfyworkbench.ios`。
+- 运行事件与错误使用合成数据测试，未提交真实 GPU 任务。iPhone XS / iOS 15 材质与手势、实际任务运行、DDNSTO 验证仍需设备验收。
+
+IPA SHA-256：
+
+```text
+242efbec0668287c9a14091d8b8148983b119f795f05caf193e21103e051c49e
+```
+
+## 历史版本：0.3.0（build 3）
 
 - 构建出处：[GitHub Actions](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/39984099647)。
 - 构建源码提交：`2e74abb1174b03c8b4530db7469e7144a5fa76bf`。
