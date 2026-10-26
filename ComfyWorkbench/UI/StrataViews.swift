@@ -63,7 +63,9 @@ struct PlacesConnectionPage: View {
                                 ProgressView(value: min(max(used / total, 0), 1)).tint(Color(red: 0.54, green: 0.78, blue: 0.78))
                             }
                         }
-                        if strata.status?.paused == true {
+                        if strata.profile.serverID.isEmpty {
+                            Button("设置办公室连接") { settings = true }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink)
+                        } else if strata.status?.paused == true {
                             Button("恢复并加载模型") { Task { await strata.control("resume") } }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink)
                         } else {
                             HStack(spacing: 10) {
@@ -72,7 +74,7 @@ struct PlacesConnectionPage: View {
                                 Button("暂停") { confirmation = "pause" }.buttonStyle(.bordered)
                             }.font(.subheadline)
                         }
-                        Text("释放显存：下次对话可自动唤醒。\n暂停：停止接收新任务，等待当前任务结束后释放，需手动恢复。").font(.caption).foregroundColor(.secondary).lineSpacing(4)
+                        Text("释放显存：下次对话可自动唤醒。\n暂停：当前生成结束后释放，后续任务步骤等待手动恢复。").font(.caption).foregroundColor(.secondary).lineSpacing(4)
                         HStack {
                             if strata.busy { ProgressView().scaleEffect(0.8); Text("操作进行中").font(.caption) }
                             Spacer()
@@ -107,7 +109,7 @@ struct PlacesConnectionPage: View {
     }
     private var confirmationTitle: String {
         switch confirmation {
-        case "pause": return "暂停办公室 Strata？当前任务继续完成，新请求将被阻止，直到手动恢复。"
+        case "pause": return "暂停办公室 Strata？当前生成继续完成，新请求和后续任务步骤等待手动恢复。"
         case "release": return "空闲时卸载 Strata 模型？后续聊天可以自动唤醒。"
         case "free_comfy": return "释放办公室 ComfyUI 的驻留模型？仅在运行和等待队列均为空时执行。"
         default: return "空闲时卸载并重新加载办公室 Strata 模型？"
@@ -140,6 +142,7 @@ struct StrataSettings: View {
                         } catch { strata.notice = error.localizedDescription }
                     }.disabled(internet.isEmpty)
                     Text(strata.route).font(.caption).foregroundColor(.secondary)
+                    if let notice = strata.notice { Text(notice).font(.caption).fixedSize(horizontal: false, vertical: true) }
                 }
                 Section(footer: Text("全局暂停需要办公室控制桥作为唯一入口。原推理服务应只监听服务器本机，避免其他客户端绕过暂停。")) {
                     Text("首次接入需部署控制桥").font(.subheadline)
@@ -236,5 +239,6 @@ struct StrataChatPage: View {
             }.navigationViewStyle(.stack)
         }
         .onDisappear { strata.save() }
+        .onChange(of: strata.draft) { _ in strata.scheduleDraftSave() }
     }
 }

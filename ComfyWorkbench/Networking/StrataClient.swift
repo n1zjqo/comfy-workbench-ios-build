@@ -23,6 +23,7 @@ public struct StrataStatus: Codable, Equatable {
     public var model: String
     public var gpu: [String: Double]
     public var title: String {
+        if paused && !online { return "已暂停 · 推理服务状态待确认" }
         if paused { return loaded ? "已暂停 · 等待释放资源" : "已暂停 · 需手动恢复" }
         if !online { return "推理服务离线" }
         if maintenance { return "正在切换模型" }
@@ -52,7 +53,7 @@ public struct StrataTask: Codable, Equatable, Identifiable {
     public var pending: StrataPending?
     public var step: Int
     public var finished: Bool { ["completed", "cancelled", "failed"].contains(state) }
-    public var stateLabel: String { ["running": "执行中", "approval": "等待你确认", "completed": "已完成", "cancelled": "已取消", "failed": "未完成"][state] ?? state }
+    public var stateLabel: String { ["running": "执行中", "paused": "等待恢复 Strata", "approval": "等待你确认", "completed": "已完成", "cancelled": "已取消", "failed": "未完成"][state] ?? state }
 }
 public struct StrataFailure: LocalizedError {
     public let message: String

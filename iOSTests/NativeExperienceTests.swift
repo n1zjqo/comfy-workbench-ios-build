@@ -95,7 +95,6 @@ final class NativeExperienceTests: XCTestCase {
             if tab == 1 { try capturePreview(window, name: "application") }
             if tab == 4 { try capturePreview(window, name: "clipboard") }
             if tab == 3 { try capturePreview(window, name: "places") }
-            if tab == 3 { try capturePreview(window, name: "places") }
             window.isHidden = true
         }
     }
@@ -114,6 +113,7 @@ final class NativeExperienceTests: XCTestCase {
             XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
         }
         let attachment = XCTAttachment(image: render); attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+        guard name.hasPrefix("strata-") else { return }
         // Synthetic fixtures only. Export the native render through the CI log for visual review.
         let encoded = Array(try XCTUnwrap(render.pngData()).base64EncodedString().utf8)
         let count = (encoded.count + 4095) / 4096

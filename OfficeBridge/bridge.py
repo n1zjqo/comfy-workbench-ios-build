@@ -60,7 +60,8 @@ class Upstream:
             headers['Authorization'] = 'Bearer ' + self.key
         request = Request(root + path, data=None if body is None else json.dumps(body).encode(), headers=headers)
         try:
-            return self.opener.open(request, timeout=600)
+            slow = path == '/load' or path.startswith(('/v1/chat/', '/v1/responses', '/v1/messages', '/v1/completions'))
+            return self.opener.open(request, timeout=600 if slow else 8)
         except HTTPError as error:
             # Do not relay upstream pages, configuration, prompts or credentials in error messages.
             error.close()
@@ -194,6 +195,9 @@ class Gateway:
                 if self.health().get('loaded'):
                     raise Failure('尚未确认模型资源已释放')
             if action in ('load', 'resume', 'reload'):
+                with self.lock:
+                    if self.pause_revision != pause_revision:
+                        return self.status()
                 self.prepare_load()
                 self.upstream.json('/load', {})
                 if not self.health().get('loaded'):
@@ -206,6 +210,11 @@ class Gateway:
         finally:
             with self.lock:
                 self.maintenance = False
+                if action == 'resume' and not self.paused:
+                    for task in self.tasks.values():
+                        if task['state'] == 'paused':
+                            task['state'] = 'running'
+                            threading.Thread(target=self.run_task, args=(task,), daemon=True).start()
 
     def drain_once(self):
         with self.lock:
@@ -259,7 +268,7 @@ class Gateway:
         with self.lock:
             if self.paused:
                 raise Failure('Strata 已暂停', 423)
-            if any(t['state'] in ('running', 'approval') for t in self.tasks.values()):
+            if any(t['state'] in ('running', 'approval', 'paused') for t in self.tasks.values()):
                 raise Failure('请先完成或取消当前任务')
             if len(self.tasks) >= 30:
                 self.tasks.pop(next(iter(self.tasks)))
@@ -282,6 +291,10 @@ class Gateway:
             while task['step'] < 12:
                 with self.lock:
                     if task['state'] != 'running':
+                        return
+                    if self.paused:
+                        task['state'] = 'paused'
+                        task['events'].append('等待手动恢复 Strata 后继续后续步骤')
                         return
                     task['step'] += 1
                     task['events'].append('正在处理第 %d 步' % task['step'])
@@ -354,6 +367,19 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def page(self, path):
+        with self.server.gate.upstream.open(path) as response:
+            mime = response.headers.get('Content-Type', 'application/octet-stream')
+            data = response.read(LIMIT + 1)
+        if len(data) > LIMIT:
+            raise Failure('网页资源过大', 502)
+        self.send_response(200)
+        self.send_header('Content-Type', mime)
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         self.handle_request(False)
 
@@ -364,8 +390,14 @@ class Handler(BaseHTTPRequestHandler):
         gate = self.server.gate
         path = urlsplit(self.path).path
         try:
-            if not post and path in ('/', '/workbench/info'):
+            if not post and path == '/workbench/info':
                 self.reply(gate.info())
+                return
+            if not post and (path == '/' or (path.startswith(('/web/', '/fonts/')) and '..' not in path and '%' not in path and '\\' not in path)):
+                self.page(path)
+                return
+            if not post and path in ('/health', '/api/health'):
+                self.reply(gate.health())
                 return
             if not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + self.server.key):
                 raise Failure('API 密钥不正确', 401)
@@ -394,9 +426,14 @@ class Handler(BaseHTTPRequestHandler):
                         if not task:
                             raise Failure('任务不存在，控制服务可能已重启', 404)
                         self.reply(gate.task_view(task))
-            elif post and path in ('/load', '/unload'):
-                self.reply(gate.control('load' if path == '/load' else 'release'))
+            elif post and path in ('/load', '/unload', '/v1/load', '/v1/unload'):
+                loading = path.endswith('/load')
+                value = gate.control('load' if loading else 'release')
+                value['status'] = 'loaded' if loading else 'unloaded'
+                self.reply(value)
             elif post and path in ('/v1/chat/completions', '/v1/responses', '/v1/completions', '/v1/messages'):
+                if not body.get('model'):
+                    body['model'] = gate.config['model']
                 with gate.admission():
                     with gate.upstream.open(path, body) as response:
                         if body.get('stream') is True:
@@ -417,8 +454,10 @@ class Handler(BaseHTTPRequestHandler):
                             if len(data) > LIMIT:
                                 raise Failure('响应过大', 502)
                             self.reply(json.loads(data))
-            elif not post and path in ('/health', '/v1/status', '/v1/models'):
+            elif not post and path in ('/v1/status', '/v1/models', '/models', '/settings', '/config', '/mcp', '/props', '/slots', '/metrics'):
                 self.reply(gate.upstream.json(path))
+            elif post and path == '/settings':
+                self.reply(gate.upstream.json(path, body))
             else:
                 raise Failure('此接口未开放', 404)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):

@@ -24,6 +24,7 @@ private struct StrataArchive: Codable {
     private let storage: URL
     private var chatTask: Task<Void, Never>?
     private var polling: Task<Void, Never>?
+    private var draftSave: Task<Void, Never>?
     private var refreshing = false
     init(storage: URL? = nil, client: StrataClient = StrataClient(), credentialReader: @escaping (String) throws -> String? = { try KeychainStore.password(for: $0) }) {
         self.client = client
@@ -43,6 +44,13 @@ private struct StrataArchive: Codable {
             try FileManager.default.createDirectory(at: storage.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONEncoder().encode(archive).write(to: storage, options: [.atomic, .completeFileProtection])
         } catch { notice = "草稿未能保存：" + error.localizedDescription }
+    }
+    func scheduleDraftSave() {
+        draftSave?.cancel()
+        draftSave = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 750_000_000) } catch { return }
+            self?.save()
+        }
     }
     func configure(lan: String, internet: String, token: String) async {
         guard !busy, !chatting else { return }
@@ -65,7 +73,7 @@ private struct StrataArchive: Codable {
                 let next = try await client.task(id: item.id, profile: profile, key: key())
                 update(next)
             }
-        } catch { if manual { notice = error.localizedDescription }; if route != "连接暂不可用" { route = "连接暂不可用" }; status = nil }
+        } catch { if manual { notice = error.localizedDescription }; if route != "连接暂不可用" { route = "连接暂不可用" }; if status != nil { status = nil } }
     }
     func resume() {
         guard polling == nil else { return }
@@ -76,7 +84,7 @@ private struct StrataArchive: Codable {
             }
         }
     }
-    func background() { polling?.cancel(); polling = nil; save() }
+    func background() { polling?.cancel(); polling = nil; draftSave?.cancel(); save() }
     func control(_ action: String) async {
         guard !busy else { return }; busy = true; defer { busy = false }
         do { status = try await client.control(action, profile: profile, key: key()) }

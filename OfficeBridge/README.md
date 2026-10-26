@@ -18,7 +18,7 @@
 5. DDNSTO 为此入口添加独立 HTTPS 映射。现有 ComfyUI 映射继续使用原端口。手机填写桥的内网/公网地址，首次验证后保存设备 ID，密钥存 iOS Keychain。
 6. 回滚：先停止桥，再恢复已备份的原监听配置和服务。保留暂停状态文件和原始模型文件。部署期间应确保两边队列空闲。
 
-桥开放 `/workbench/info`（无密钥设备标识），其余接口均要求 Bearer 密钥。禁止重定向和环境代理；只可转发给配置中的本机上游。兼容 Chat Completions、Responses、Completions、Messages 的推理入口和 load/unload。**本版不代理原 Strata 网页静态资源、设置或上传接口**，原网页不能通过桥原样使用，部署前需明确这一变化。App 对话支持文字和缩小后的 JPEG；不读取浏览器 Cookie。
+设备标识、网页静态资源和原健康检查不要求密钥，其余接口要求 Bearer 密钥。禁止重定向和环境代理；只可转发给配置中的本机上游。兼容 Chat Completions、Responses、Completions、Messages 的推理入口和 load/unload。保留原网页聊天所需的首页、字体、静态文件、健康检查、读取设置及共享默认设置接口；运行配置变更、MCP 配置、会话槽写入和图像生成等额外接口不开放，需在本机管理。网页聊天仍需用部署后的实际版本验收。App 对话支持文字和缩小后的 JPEG；不读取浏览器 Cookie。
 
 ## 任务执行范围
 
@@ -28,4 +28,8 @@
 
 ## 验证
 
-`python -B -m unittest discover -s . -v` 使用虚构上游、临时任务目录，不监听端口，不调用模型或读取剪贴板。尚需真实服务器的暂停竞态、断线、流式响应、图片、DDNSTO 与显存切换验收。
+`python -B test_bridge.py -v` 使用虚构上游、临时任务目录，不监听端口，不调用模型或读取剪贴板。尚需真实服务器的暂停竞态、断线、流式响应、图片、DDNSTO 与显存切换验收。
+
+## ComfyUI 双地址身份节点
+
+配套 comfy_workbench_identity 目录是可选 ComfyUI 自定义节点，只注册 /workbench/identity，不增加画布节点、不修改工作流。部署前需单独批准复制至 ComfyUI 的 custom_nodes、设置固定 WORKBENCH_SERVER_ID UUID 并在队列空闲时重启 ComfyUI。此接口不返回密钥或机器信息；它用于避免意外连接另一台机器，不替代 TLS，局域网仍须可信。未部署时 App 仍可使用原单地址连接。

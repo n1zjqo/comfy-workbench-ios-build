@@ -1,11 +1,13 @@
 import contextlib
 import json
+import io
 from pathlib import Path
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
-from bridge import Gateway, Failure, Upstream
+from bridge import Gateway, Failure, Upstream, Handler, LIMIT
 
 
 class FakeUpstream:
@@ -163,6 +165,50 @@ class BridgeTests(unittest.TestCase):
         for url in ('https://example.com', 'http://192.168.1.20', 'http://name:secret@127.0.0.1'):
             with self.assertRaises(ValueError):
                 Upstream(url, 'synthetic')
+    def request(self, path, body=None, key='synthetic-secret', size=None):
+        handler = object.__new__(Handler)
+        handler.path = path
+        data = json.dumps(body).encode() if body is not None else b''
+        handler.headers = {'Authorization': 'Bearer ' + key, 'Content-Length': str(len(data) if size is None else size)}
+        handler.rfile = io.BytesIO(data)
+        handler.server = SimpleNamespace(gate=self.gate, key='synthetic-secret')
+        handler.connection = SimpleNamespace(settimeout=lambda _: None)
+        result = []
+        handler.reply = lambda value, status=200: result.append((status, value))
+        handler.handle_request(body is not None)
+        return result[0]
+    def test_http_control_requires_key(self):
+        code, _ = self.request('/workbench/control', {'action': 'pause'}, key='wrong')
+        self.assertEqual(code, 401)
+        self.assertFalse(self.gate.paused)
+    def test_http_identity_has_no_credentials(self):
+        code, body = self.request('/workbench/info', key='')
+        self.assertEqual(code, 200)
+        self.assertEqual(set(body), {'protocolVersion', 'service', 'serverId', 'name'})
+    def test_http_all_generation_routes_respect_pause(self):
+        self.gate.control('pause')
+        for path in ('/v1/chat/completions', '/v1/messages', '/v1/responses', '/v1/completions'):
+            code, body = self.request(path, {'model': 'synthetic', 'stream': True})
+            self.assertEqual(code, 423, path)
+    def test_http_legacy_load_unload_reply_remains_compatible(self):
+        code, result = self.request('/unload?wait=0', {})
+        self.assertEqual((code, result['status']), (200, 'unloaded'))
+        code, result = self.request('/load', {})
+        self.assertEqual((code, result['status']), (200, 'loaded'))
+    def test_http_blocks_unknown_mutation_and_oversized_payload(self):
+        self.assertEqual(self.request('/config', {'host': '0.0.0.0'})[0], 404)
+        self.assertEqual(self.request('/workbench/control', {}, size=LIMIT + 1)[0], 413)
+    def test_task_pauses_between_model_steps(self):
+        self.gate.paused = True
+        task = {'state': 'running', 'step': 0, 'events': [], '_messages': []}
+        self.gate.run_task(task)
+        self.assertEqual(task['state'], 'paused')
+        self.assertEqual(task['step'], 0)
+        self.assertEqual(self.up.calls, [])
+    def test_paused_task_blocks_duplicate_new_task(self):
+        self.gate.tasks['existing'] = {'state': 'paused'}
+        with self.assertRaises(Failure):
+            self.gate.new_task({'prompt': 'synthetic task'})
 
 
 if __name__ == '__main__':
