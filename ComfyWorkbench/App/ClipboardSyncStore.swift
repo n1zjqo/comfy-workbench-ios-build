@@ -97,7 +97,7 @@ final class ClipboardSyncStore: ObservableObject {
             if entry.kind == "text" { UIPasteboard.general.setItems([["public.utf8-plain-text": entry.text ?? ""]], options: [.localOnly: true]) }
             else if let data = Data(base64Encoded: entry.data ?? ""), UIImage(data: data) != nil { UIPasteboard.general.setItems([["public.png": data]], options: [.localOnly: true]) }
             else { throw ClipboardFailure("图片内容无效") }
-            changeCount = UIPasteboard.general.changeCount; localChangedAt = Date()
+            changeCount = UIPasteboard.general.changeCount; if notify { localChangedAt = Date() }
             var next = archive; next.lastDigest = entry.input.digest; try commit(next)
             if notify { notice = "已复制" }
         } catch { notice = error.localizedDescription }
@@ -147,3 +147,4 @@ final class ClipboardSyncStore: ObservableObject {
         }
     }
 }
+
