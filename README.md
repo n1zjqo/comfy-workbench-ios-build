@@ -2,7 +2,19 @@
 
 面向 iPhone / iOS 15.0+ 的非官方原生 SwiftUI 客户端，参考 [Mimikkoro1/comfy-workbench-android](https://github.com/Mimikkoro1/comfy-workbench-android) 的直连 ComfyUI 与工作流参数映射思路，提供对话式生成、AI 应用式参数面板及右滑清屏。界面设计参考 [Anthropic frontend-design](https://github.com/anthropics/skills/blob/main/skills/frontend-design/SKILL.md)。
 
-版本 **0.4.0（build 4）** 已通过 [GitHub Actions 构建](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/39992839963)：69 项核心/网络测试与 5 项 iOS 原生测试零失败，并生成 arm64 IPA。构建使用 Xcode 16.4 / iOS 18.5 SDK，部署目标 iOS 15.0。下载后已核对 SHA-256、版本和 Mach-O；本轮未进行 iPhone XS / iOS 15 真机验收。
+版本 **0.5.0（build 5）**：以现有 App 为主，加入全新 LanAI Companion 同步协议。0.5.0 正在进行 macOS 编译与测试；此前 0.4.0 的 74 项自动检查已通过，不能代替本版验证或 iPhone XS 真机验收。
+
+## 0.5.0 多设备剪贴板
+
+- 底部“同步”页：文字、PNG 图片、来源设备、历史记录、待发送队列，支持一键用作提示词或设为聊天底图。
+- 配对新的 Windows LanAI Companion：在电脑启动中心，开启 2 分钟单次配对码；每台设备独立令牌，可在电脑端移除。
+- 手动填写局域网和公网 HTTPS 双地址，优先局域网，失败自动尝试公网；每次切换校验中心 ID，不把令牌发送到不匹配的中心。仅信任自己填写的局域网；中心 ID 校验不替代 TLS。
+- iOS 前台自动发送/自动接收可分别开启；返回前台补同步。iOS 后台挂起或锁屏期间不保证持续同步，TrollStore 安装不会改变这个实现范围。
+- 断网待发送保留编号，恢复后重试；中心持久化去重；接收到的内容不自动回传。首次配对仅加载历史，不覆盖当前剪贴板；本地新复制优先。
+- 单条文字最大 256 KB，PNG 最大 5 MB / 2400 万像素；历史最多 100 条、32 MB，待发送最多 30 条、32 MB；超过 7 天的待发送需重新发送。
+- 令牌保存在 Keychain；iOS 本地历史/待发送启用完整文件保护。Windows 端使用当前用户的 DPAPI 加密保存。公网使用 HTTPS；未实现端到端加密。
+- DDNSTO 验证入口支持手动打开公网网页并返回重试。需要自行配置可到达同一中心的 HTTPS 转发；未配置公网域名时只可局域网使用。
+- 使用新的 `/v1` 协议，不兼容旧 LanAI 设备；旧 AI 聊天、共享文件尚未迁入这一版。
 
 ## 0.4.0 图片、运行状态与编辑体验
 

@@ -4,6 +4,37 @@ import UIKit
 @testable import ComfyWorkbench
 
 final class NativeExperienceTests: XCTestCase {
+    @MainActor func testClipboardHistoryCopiesAndPersistsWithoutEcho() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let storage = folder.appendingPathComponent("clipboard.json")
+        let entry = try JSONDecoder().decode(ClipboardEntry.self, from: Data("{\"id\":\"\(UUID().uuidString)\",\"sequence\":1,\"deviceId\":\"test-computer\",\"deviceName\":\"Test computer\",\"kind\":\"text\",\"text\":\"Synthetic clipboard\",\"createdAt\":1700000000000}".utf8))
+        let sync = ClipboardSyncStore(storageURL: storage)
+        sync.setAutomatic(send: true, receive: true); sync.copy(entry)
+        XCTAssertEqual(UIPasteboard.general.string, "Synthetic clipboard")
+        let restored = ClipboardSyncStore(storageURL: storage)
+        XCTAssertTrue(restored.archive.autoSend); XCTAssertTrue(restored.archive.autoReceive)
+        XCTAssertEqual(restored.archive.lastDigest, entry.input.digest)
+        XCTAssertTrue(restored.archive.outbox.isEmpty)
+        XCTAssertEqual(sync.notice, "已复制")
+        let protection = try FileManager.default.attributesOfItem(atPath: storage.path)[.protectionKey] as? FileProtectionType
+        XCTAssertEqual(protection, .complete)
+    }
+
+    @MainActor func testClipboardPageRendersOnXSViewport() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let sync = ClipboardSyncStore(storageURL: folder.appendingPathComponent("clipboard.json"))
+        let store = WorkbenchStore(storageURL: folder)
+        let window = try host(ZStack { ArtworkBackground(image: nil); ClipboardPage().environmentObject(sync).environmentObject(store) }.preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        XCTAssertFalse(descendants(window).compactMap { $0 as? UIVisualEffectView }.isEmpty)
+        var rendered = false
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in rendered = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
+        XCTAssertTrue(rendered)
+        let attachment = XCTAttachment(image: image); attachment.name = "Clipboard XS viewport"; attachment.lifetime = .keepAlways; add(attachment)
+    }
+
     @MainActor func testBackgroundDoesNotMultiplyPixelsByRetinaScale() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }

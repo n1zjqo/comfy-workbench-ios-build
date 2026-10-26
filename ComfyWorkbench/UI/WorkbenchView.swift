@@ -24,6 +24,7 @@ struct WorkbenchView: View {
                     case 0: ChatView(clean: $clean)
                     case 1: WorkflowPage()
                     case 2: GalleryPage()
+                    case 4: ClipboardPage()
                     default: ConnectionPage()
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -32,6 +33,7 @@ struct WorkbenchView: View {
                         tab(0, "对话", "bubble.left.and.bubble.right")
                         tab(1, "应用", "slider.horizontal.3")
                         tab(2, "作品", "square.stack")
+                        tab(4, "同步", "doc.on.clipboard")
                         tab(3, "连接", "network")
                     }.padding(.vertical, 7).glass(26).padding(.horizontal, 18).padding(.bottom, 6)
                 }
@@ -197,7 +199,7 @@ struct ConnectionPage: View {
                 }.padding(20).glass()
                 Divider()
                 Text("Comfy Workbench for iOS").font(.headline)
-                Text("0.4.0 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
+                Text("0.5.0 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
             }.padding(24)
         }.onAppear {
             if let config = store.server { address = config.baseURL; username = config.username; key = config.passwordKey; password = (try? KeychainStore.password(for: key)) ?? "" }
