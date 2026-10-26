@@ -8,7 +8,8 @@
 - IPA：0.5.0 / build 5，arm64，最低 iOS 15.0。macOS CI 校验 ad-hoc 签名；下载后独立核对 SHA-256、Mach-O、版本、ZIP CRC 和未混入 XCTest。
 - IPA SHA-256：`dd8d90f5eaf326ef0da1158c5fe8d8243e27c957021c88e22951e188ed2beb8d`。
 - Windows Companion：.NET 10 Release x64，零警告；30 项本地断言通过。已渲染并检查原生界面示例。此项目源文件不包含 Windows 伴侣程序，交付包另附。
-- 尚未启动真实同步中心，未读取用户剪贴板，未执行本机 HTTP 监听联调（等待手动批准），未修改防火墙或替换旧 LanAI。
+- 2026-10-26 经用户明确批准，使用交付版 Windows 程序在 `127.0.0.1:18999` 完成本机 HTTP 联调：5 项检查通过（设备配对、虚构文字收发、重试去重、设备移除、拒绝带 Origin 的网页请求）。测试结束进程退出，端口无残留监听。
+- 正式同步中心尚未启动，未读取真实剪贴板，未修改防火墙或替换旧 LanAI。
 - 未完成 iPhone XS / iOS 15 / TrollStore 的安装、性能与系统剪贴板实测；未配置公网 HTTPS 域名，未做真实内外网切换和 DDNSTO 验证联调。
 
 实现使用 [Apple 的完整文件保护写入选项](https://developer.apple.com/documentation/uikit/encrypting-your-app-s-files)。[文件保护属性的值类型](https://developer.apple.com/documentation/foundation/fileattributekey/protectionkey)为 NSString；锁屏后的实际保护行为需要物理设备测试。
