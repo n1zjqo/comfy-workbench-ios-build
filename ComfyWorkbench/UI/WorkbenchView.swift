@@ -4,7 +4,6 @@ import UniformTypeIdentifiers
 struct WorkbenchView: View {
     @EnvironmentObject var store: WorkbenchStore
     @State private var clean = false
-    @State private var photoPicker = false
     var body: some View {
         ZStack {
             if store.activeTab == 0 {
@@ -14,7 +13,7 @@ struct WorkbenchView: View {
                 Palette.workspace.ignoresSafeArea()
             }
             VStack(spacing: 0) {
-                if let config = store.verificationRequired, !clean {
+                if let config = store.verificationRequired, !clean, [0, 1, 3].contains(store.activeTab) {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("需要网页验证").font(.subheadline.weight(.semibold))

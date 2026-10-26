@@ -140,8 +140,9 @@ struct FittedArtwork: View {
             ZStack {
                 Color.black
                 Image(uiImage: image).resizable().frame(width: size.width, height: size.height)
-                    .clipShape(GlassContour(radius: 12)).overlay(CrystalFrame().frame(width: size.width, height: size.height))
-                    .scaleEffect(scale).offset(offset)
+                    .clipShape(GlassContour(radius: 12 / scale)).scaleEffect(scale)
+                    .overlay(CrystalFrame().frame(width: size.width * scale, height: size.height * scale))
+                    .offset(offset)
             }.frame(width: geo.size.width, height: geo.size.height).clipped().contentShape(Rectangle())
                 .gesture(MagnificationGesture().updating($pinch) { value, state, _ in state = value }
                     .onEnded { value in

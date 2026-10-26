@@ -42,7 +42,12 @@ final class NativeExperienceTests: XCTestCase {
         }
         let attachment = XCTAttachment(image: render); attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
         // Synthetic fixtures only. Export the native render through the CI log for visual review.
-        print("NATIVE_PREVIEW \(name) \(try XCTUnwrap(render.pngData()).base64EncodedString())")
+        let encoded = Array(try XCTUnwrap(render.pngData()).base64EncodedString().utf8)
+        let count = (encoded.count + 4095) / 4096
+        for index in 0..<count {
+            let chunk = String(decoding: encoded[(index * 4096)..<min(encoded.count, (index + 1) * 4096)], as: UTF8.self)
+            print("NATIVE_PREVIEW \(name) \(index)/\(count) \(chunk)")
+        }
     }
     @MainActor func testClipboardHistoryCopiesAndPersistsWithoutEcho() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
