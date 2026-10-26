@@ -10,6 +10,7 @@ final class ClipboardSyncStore: ObservableObject {
     @Published private(set) var refreshing = false
     @Published var notice: String?
     private let client: ClipboardClient
+    private let credentialReader: (String) throws -> String?
     private let storage: URL
     private var loop: Task<Void, Never>?
     private var pasteboardObserver: NSObjectProtocol?
@@ -20,8 +21,9 @@ final class ClipboardSyncStore: ObservableObject {
     private var polling = false
     private var refreshRequested = false
 
-    init(storageURL: URL? = nil, client: ClipboardClient = ClipboardClient()) {
+    init(storageURL: URL? = nil, client: ClipboardClient = ClipboardClient(), credentialReader: @escaping (String) throws -> String? = { try KeychainStore.password(for: $0) }) {
         self.client = client
+        self.credentialReader = credentialReader
         storage = storageURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ClipboardSync/state.json")
         changeCount = UIPasteboard.general.changeCount
         do { if FileManager.default.fileExists(atPath: storage.path) { archive = try JSONDecoder().decode(ClipboardArchive.self, from: Data(contentsOf: storage)); status = "等待同步" } }
@@ -145,7 +147,7 @@ final class ClipboardSyncStore: ObservableObject {
         if manualRefresh { await client.reset() }
         let started = Date(), hadPending = !archive.outbox.isEmpty
         do {
-            guard let token = try KeychainStore.password(for: profile.tokenKey) else { throw ClipboardFailure("配对凭据不可用，请重新配对") }
+            guard let token = try credentialReader(profile.tokenKey) else { throw ClipboardFailure("配对凭据不可用，请重新配对") }
             if let first = archive.outbox.first {
                 let (receipt, label) = try await client.send(first, profile: profile, token: token)
                 try Task.checkCancellation()

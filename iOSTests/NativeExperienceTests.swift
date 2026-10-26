@@ -26,13 +26,12 @@ final class NativeExperienceTests: XCTestCase {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let storage = folder.appendingPathComponent("clipboard.json")
         let profile = ClipboardProfile(lanURL: "", publicURL: "https://example.com", deviceName: "Synthetic phone", hubId: "layout-test", deviceId: UUID().uuidString)
-        defer { try? KeychainStore.deletePassword(for: profile.tokenKey); try? FileManager.default.removeItem(at: folder); QuietClipboardProtocol.fail = false }
+        defer { try? FileManager.default.removeItem(at: folder); QuietClipboardProtocol.fail = false }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var archive = ClipboardArchive(); archive.profile = profile
         try JSONEncoder().encode(archive).write(to: storage)
-        try KeychainStore.savePassword(String(repeating: "a", count: 64), for: profile.tokenKey)
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [QuietClipboardProtocol.self]
-        let sync = ClipboardSyncStore(storageURL: storage, client: ClipboardClient(configuration: configuration))
+        let sync = ClipboardSyncStore(storageURL: storage, client: ClipboardClient(configuration: configuration), credentialReader: { _ in String(repeating: "a", count: 64) })
         await sync.tick(force: true)
         XCTAssertEqual(sync.status, "已同步"); XCTAssertFalse(sync.refreshing); XCTAssertFalse(sync.busy)
         var publications = 0
