@@ -2,7 +2,7 @@
 
 面向 iPhone / iOS 15.0+ 的非官方原生 SwiftUI 客户端，参考 [Mimikkoro1/comfy-workbench-android](https://github.com/Mimikkoro1/comfy-workbench-android) 的直连 ComfyUI 与工作流参数映射思路，提供对话式生成、AI 应用式参数面板及右滑清屏。界面设计参考 [Anthropic frontend-design](https://github.com/anthropics/skills/blob/main/skills/frontend-design/SKILL.md)。
 
-版本 **0.5.2（build 7）** 已通过 [GitHub Actions 构建](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/40329824188)，最低 iOS 15.0。81 项核心/网络测试、11 项原生测试通过，1 项硬件文件保护属性检查在模拟器跳过。同步页新增回归确认：刷新不移动下方卡片，未变化的自动轮询不发布 UI 更新。IPA 已核对版本、arm64、SHA-256 和归档完整性；XS / iOS 15 真机仍需安装确认。
+版本 **0.6.0（build 8）** 已通过 [GitHub Actions 构建](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/40341475029)，最低 iOS 15.0。90 项核心/网络测试、12 项原生测试及 25 项控制桥测试通过，1 项硬件文件保护属性检查在模拟器跳过。IPA 已核对版本、arm64、SHA-256、嵌入签名和归档完整性；XS / iOS 15 真机仍需安装确认。办公室控制桥尚未部署，Strata 控制、对话与任务需部署后联调。
 
 ## 0.6.0 办公室 Strata（服务端需另行部署）
 
