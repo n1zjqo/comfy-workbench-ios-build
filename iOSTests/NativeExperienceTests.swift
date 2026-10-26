@@ -1,9 +1,62 @@
 import XCTest
 import SwiftUI
 import UIKit
+import Combine
 @testable import ComfyWorkbench
 
 final class NativeExperienceTests: XCTestCase {
+    @MainActor func testClipboardRefreshKeepsFollowingContentAtTheSamePosition() throws {
+        let state = RefreshLayoutState()
+        var cardFrame = CGRect.zero
+        let window = try host(RefreshLayoutFixture(state: state) { cardFrame = $0 }.preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        let original = cardFrame
+        XCTAssertGreaterThan(original.minY, 0)
+        for refreshing in [true, false, true, false] {
+            state.refreshing = refreshing
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            window.layoutIfNeeded()
+            XCTAssertEqual(cardFrame.minY, original.minY, accuracy: 0.5, "Refresh state must not move the card below it")
+            XCTAssertEqual(cardFrame.size.height, original.size.height, accuracy: 0.5)
+            XCTAssertEqual(cardFrame.size.width, original.size.width, accuracy: 0.5)
+        }
+    }
+
+    @MainActor func testAutomaticClipboardPollingIsVisuallyQuietAndManualRefreshFinishes() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let storage = folder.appendingPathComponent("clipboard.json")
+        let profile = ClipboardProfile(lanURL: "", publicURL: "https://example.com", deviceName: "Synthetic phone", hubId: "layout-test", deviceId: UUID().uuidString)
+        defer { try? KeychainStore.deletePassword(for: profile.tokenKey); try? FileManager.default.removeItem(at: folder); QuietClipboardProtocol.fail = false }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var archive = ClipboardArchive(); archive.profile = profile
+        try JSONEncoder().encode(archive).write(to: storage)
+        try KeychainStore.savePassword(String(repeating: "a", count: 64), for: profile.tokenKey)
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [QuietClipboardProtocol.self]
+        let sync = ClipboardSyncStore(storageURL: storage, client: ClipboardClient(configuration: configuration))
+        await sync.tick(force: true)
+        XCTAssertEqual(sync.status, "已同步"); XCTAssertFalse(sync.refreshing); XCTAssertFalse(sync.busy)
+        var publications = 0
+        let observation = sync.objectWillChange.sink { publications += 1 }
+        defer { observation.cancel() }
+        for _ in 0..<4 { await sync.tick(force: true) }
+        XCTAssertEqual(publications, 0, "Unchanged automatic polls must not publish loading or identical status changes")
+        sync.retry(); XCTAssertTrue(sync.refreshing)
+        await sync.tick(force: true)
+        XCTAssertFalse(sync.refreshing); XCTAssertEqual(sync.status, "已同步")
+        QuietClipboardProtocol.fail = true
+        sync.retry(); await sync.tick(force: true)
+        XCTAssertFalse(sync.refreshing); XCTAssertTrue(sync.route.contains("离线"))
+        publications = 0; await sync.tick(force: true)
+        XCTAssertEqual(publications, 0, "An unchanged reconnect failure must not redraw the page repeatedly")
+        QuietClipboardProtocol.fail = false
+        sync.retry(); await sync.tick(force: true)
+        XCTAssertFalse(sync.refreshing); XCTAssertEqual(sync.status, "已同步")
+        let store = WorkbenchStore(storageURL: folder.appendingPathComponent("workbench"))
+        let window = try host(ClipboardPage().environmentObject(sync).environmentObject(store).preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        try capturePreview(window, name: "clipboard-stable")
+    }
+
     @MainActor func testWorkspaceTabsNeverRenderChatPhotoAndCaptureNativeLayout() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -224,5 +277,39 @@ final class NativeExperienceTests: XCTestCase {
         }
         return { x, y in let index = (y * width + x) * 4; return (bytes[index], bytes[index + 1], bytes[index + 2], bytes[index + 3]) }
     }
+}
+
+private final class RefreshLayoutState: ObservableObject { @Published var refreshing = false }
+private struct CardFramePreference: PreferenceKey {
+    static var defaultValue = CGRect.zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+private struct RefreshLayoutFixture: View {
+    @ObservedObject var state: RefreshLayoutState
+    let frameChanged: (CGRect) -> Void
+    var body: some View {
+        VStack(spacing: 22) {
+            ClipboardStatusRow(route: "公网 HTTPS", status: "已同步", refreshing: state.refreshing, canRefresh: true, retry: {})
+            Color.gray.frame(height: 220).background(GeometryReader { geometry in
+                Color.clear.preference(key: CardFramePreference.self, value: geometry.frame(in: .global))
+            })
+            Spacer()
+        }.padding(22).onPreferenceChange(CardFramePreference.self, perform: frameChanged)
+    }
+}
+private final class QuietClipboardProtocol: URLProtocol {
+    static var fail = false
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        if Self.fail { client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)); return }
+        let json = request.url!.path.hasSuffix("info")
+            ? #"{"hubId":"layout-test","protocolVersion":1}"#
+            : #"{"items":[],"cursor":0,"hasMore":false,"reset":false}"#
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(json.utf8)); client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }
 

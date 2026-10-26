@@ -13,13 +13,8 @@ struct ClipboardPage: View {
                     Spacer()
                     Button { settings = true } label: { Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44).glass(16) }.accessibilityLabel("同步连接设置")
                 }
-                HStack(spacing: 9) {
-                    Circle().fill(sync.route.contains("直连") || sync.route.contains("HTTPS") ? Color(red: 0.53, green: 0.83, blue: 0.8) : .gray).frame(width: 6, height: 6)
-                    VStack(alignment: .leading, spacing: 4) { Text(sync.route).font(.subheadline.weight(.medium)); Text(sync.status).font(.caption).foregroundColor(.white.opacity(0.65)) }
-                    Spacer()
-                    if sync.busy { ProgressView().scaleEffect(0.8) }
-                    else { Button { sync.retry() } label: { Image(systemName: "arrow.clockwise").frame(width: 44, height: 44) }.accessibilityLabel("重新连接") }
-                }
+                ClipboardStatusRow(route: sync.route, status: sync.status, refreshing: sync.refreshing,
+                    canRefresh: sync.archive.profile != nil, retry: sync.retry)
                 if sync.archive.profile == nil {
                     VStack(alignment: .leading, spacing: 15) {
                         Image(systemName: "laptopcomputer.and.iphone").font(.system(size: 34, weight: .light))
@@ -68,6 +63,35 @@ struct ClipboardPage: View {
         }
         .sheet(isPresented: $settings) { ClipboardSettings().environmentObject(sync) }
         .alert("同步", isPresented: Binding(get: { sync.notice != nil }, set: { if !$0 { sync.notice = nil } })) { Button("知道了") { sync.notice = nil } } message: { Text(sync.notice ?? "") }
+    }
+}
+
+struct ClipboardStatusRow: View {
+    let route: String
+    let status: String
+    let refreshing: Bool
+    let canRefresh: Bool
+    let retry: () -> Void
+    var body: some View {
+        HStack(spacing: 9) {
+            Circle().fill(route.contains("直连") || route.contains("HTTPS") ? Color(red: 0.53, green: 0.83, blue: 0.8) : .gray).frame(width: 6, height: 6)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(route).font(.subheadline.weight(.medium))
+                Text(status).font(.caption).foregroundColor(.white.opacity(0.65))
+            }
+            Spacer()
+            Button(action: retry) {
+                ZStack {
+                    Image(systemName: "arrow.clockwise").opacity(refreshing ? 0 : 1)
+                    if refreshing { ProgressView().scaleEffect(0.8) }
+                }.frame(width: 44, height: 44).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!canRefresh || refreshing)
+            .accessibilityLabel(refreshing ? "正在刷新" : "刷新同步")
+        }
+        .frame(minHeight: 44)
+        .transaction { $0.animation = nil }
     }
 }
 

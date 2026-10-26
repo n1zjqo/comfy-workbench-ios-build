@@ -7,6 +7,7 @@ final class ClipboardSyncStore: ObservableObject {
     @Published private(set) var route = "未连接"
     @Published private(set) var status = "先和电脑配对"
     @Published private(set) var busy = false
+    @Published private(set) var refreshing = false
     @Published var notice: String?
     private let client: ClipboardClient
     private let storage: URL
@@ -15,6 +16,9 @@ final class ClipboardSyncStore: ObservableObject {
     private var changeCount: Int
     private var localChangedAt = Date.distantPast
     private var nextNetwork = Date.distantPast
+    // Polling is internal scheduling state, not a visible loading transition.
+    private var polling = false
+    private var refreshRequested = false
 
     init(storageURL: URL? = nil, client: ClipboardClient = ClipboardClient()) {
         self.client = client
@@ -37,7 +41,7 @@ final class ClipboardSyncStore: ObservableObject {
             }
         }
     }
-    func pause() { loop?.cancel(); loop = nil }
+    func pause() { loop?.cancel(); loop = nil; refreshRequested = false; if refreshing { refreshing = false } }
     private func commit(_ next: ClipboardArchive) throws {
         try FileManager.default.createDirectory(at: storage.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(next).write(to: storage, options: [.atomic, .completeFileProtection])
@@ -48,13 +52,13 @@ final class ClipboardSyncStore: ObservableObject {
         catch { notice = error.localizedDescription }
     }
     func checkConnection(lan: String, internet: String) async throws -> ClipboardConnection {
-        guard !busy else { throw ClipboardFailure("正在同步，请稍后检测") }
+        guard !busy, !polling else { throw ClipboardFailure("正在同步，请稍后检测") }
         busy = true; defer { busy = false }
         try validateAddresses(lan, internet)
         return try await client.probe(lan: lan, internet: internet, expectedHubID: archive.profile?.hubId)
     }
     func pair(lan: String, internet: String, code: String, name: String, expectedHubID: String? = nil) async {
-        guard !busy else { return }
+        guard !busy, !polling else { return }
         guard archive.outbox.isEmpty else { notice = "请先处理待发送内容，再切换中心"; return }
         busy = true; defer { busy = false }
         do {
@@ -71,7 +75,7 @@ final class ClipboardSyncStore: ObservableObject {
         } catch { notice = error.localizedDescription }
     }
     func saveAddresses(lan: String, internet: String) async {
-        guard !busy else { notice = "正在同步，请稍后保存"; return }
+        guard !busy, !polling else { notice = "正在同步，请稍后保存"; return }
         do { try validateAddresses(lan, internet); var next = archive; guard next.profile != nil else { throw ClipboardFailure("请先配对") }; next.profile?.lanURL = lan.trimmingCharacters(in: .whitespacesAndNewlines); next.profile?.publicURL = internet.trimmingCharacters(in: .whitespacesAndNewlines); try commit(next); await client.reset(); nextNetwork = .distantPast; notice = "地址已保存" }
         catch { notice = error.localizedDescription }
     }
@@ -109,10 +113,13 @@ final class ClipboardSyncStore: ObservableObject {
         } catch { notice = error.localizedDescription }
     }
     func removePending(_ id: String) { do { var next = archive; next.outbox.removeAll { $0.id == id }; try commit(next) } catch { notice = error.localizedDescription } }
-    func retry() { nextNetwork = .distantPast; Task { await client.reset() } }
+    func retry() {
+        guard archive.profile != nil, !refreshing else { return }
+        refreshRequested = true; refreshing = true; nextNetwork = .distantPast
+    }
     func disconnect() {
-        guard !busy else { notice = "正在同步，请稍后再试"; return }
-        do { let key = archive.profile?.tokenKey; try commit(ClipboardArchive()); if let key = key { try? KeychainStore.deletePassword(for: key) }; route = "未连接"; status = "先和电脑配对" }
+        guard !busy, !polling else { notice = "正在同步，请稍后再试"; return }
+        do { let key = archive.profile?.tokenKey; try commit(ClipboardArchive()); if let key = key { try? KeychainStore.deletePassword(for: key) }; refreshRequested = false; if refreshing { refreshing = false }; route = "未连接"; status = "先和电脑配对" }
         catch { notice = error.localizedDescription }
     }
     private func checkClipboard() {
@@ -123,11 +130,19 @@ final class ClipboardSyncStore: ObservableObject {
             if archive.autoSend && archive.profile != nil { do { try capture(force: false) } catch { notice = error.localizedDescription } }
         }
     }
-    private func tick() async {
+    func tick(force: Bool = false) async {
         guard UIApplication.shared.applicationState == .active else { return }
         checkClipboard()
-        guard !busy, Date() >= nextNetwork, let profile = archive.profile else { return }
-        busy = true; defer { busy = false }
+        guard !busy, !polling, force || Date() >= nextNetwork, let profile = archive.profile else { return }
+        polling = true
+        let manualRefresh = refreshRequested; refreshRequested = false
+        defer {
+            polling = false
+            if manualRefresh, refreshing { refreshing = false }
+            // A tap during an existing poll must still schedule its requested refresh.
+            if refreshRequested { nextNetwork = .distantPast }
+        }
+        if manualRefresh { await client.reset() }
         let started = Date(), hadPending = !archive.outbox.isEmpty
         do {
             guard let token = try KeychainStore.password(for: profile.tokenKey) else { throw ClipboardFailure("配对凭据不可用，请重新配对") }
@@ -135,20 +150,23 @@ final class ClipboardSyncStore: ObservableObject {
                 let (receipt, label) = try await client.send(first, profile: profile, token: token)
                 try Task.checkCancellation()
                 guard receipt.id == first.id else { throw ClipboardFailure("发送确认不匹配") }
-                var next = archive; next.outbox.removeAll { $0.id == first.id }; try commit(next); route = label
+                var next = archive; next.outbox.removeAll { $0.id == first.id }; try commit(next); if route != label { route = label }
             }
             let (batch, label) = try await client.changes(after: archive.cursor, profile: profile, token: token)
             try Task.checkCancellation()
             let initialized = archive.initialized
             if !batch.items.isEmpty || !initialized || batch.cursor != archive.cursor { var next = archive; try next.merge(batch); try commit(next) }
-            route = label
+            if route != label { route = label }
             if initialized, !batch.reset, !batch.hasMore, !hadPending, archive.outbox.isEmpty, archive.autoReceive, localChangedAt < started.addingTimeInterval(-3), UIPasteboard.general.changeCount == changeCount,
                let latest = batch.items.max(by: { $0.sequence < $1.sequence }), latest.deviceId != profile.deviceId { copy(latest, notify: false) }
-            status = archive.outbox.isEmpty ? "已同步" : "正在发送"
+            let message = archive.outbox.isEmpty ? "已同步" : "正在发送"
+            if status != message { status = message }
             nextNetwork = Date().addingTimeInterval(batch.hasMore || !archive.outbox.isEmpty ? 0.1 : 1.5)
         } catch {
             guard !Task.isCancelled else { return }
-            route = "离线 · 等待重连"; status = error is ClipboardFailure ? error.localizedDescription : "暂时无法连接，待发送内容已保留"
+            if route != "离线 · 等待重连" { route = "离线 · 等待重连" }
+            let message = error is ClipboardFailure ? error.localizedDescription : "暂时无法连接，待发送内容已保留"
+            if status != message { status = message }
             nextNetwork = Date().addingTimeInterval(4)
         }
     }
