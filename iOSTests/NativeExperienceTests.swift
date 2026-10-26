@@ -17,8 +17,19 @@ final class NativeExperienceTests: XCTestCase {
         XCTAssertEqual(restored.archive.lastDigest, entry.input.digest)
         XCTAssertTrue(restored.archive.outbox.isEmpty)
         XCTAssertEqual(sync.notice, "已复制")
+    }
+
+    @MainActor func testClipboardFileProtectionOnSupportedDevice() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let storage = folder.appendingPathComponent("clipboard.json")
+        let sync = ClipboardSyncStore(storageURL: storage)
+        sync.setAutomatic(send: true)
         // Foundation returns this attribute as NSString, not the Swift RawRepresentable wrapper.
         let protection = try FileManager.default.attributesOfItem(atPath: storage.path)[.protectionKey] as? String
+        #if targetEnvironment(simulator)
+        if protection == nil { throw XCTSkip("This simulator does not expose file protection attributes; verify complete protection on physical iOS hardware.") }
+        #endif
         XCTAssertEqual(protection, FileProtectionType.complete.rawValue)
     }
 
