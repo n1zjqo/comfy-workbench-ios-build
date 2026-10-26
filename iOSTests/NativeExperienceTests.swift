@@ -4,6 +4,46 @@ import UIKit
 @testable import ComfyWorkbench
 
 final class NativeExperienceTests: XCTestCase {
+    @MainActor func testWorkspaceTabsNeverRenderChatPhotoAndCaptureNativeLayout() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = WorkbenchStore(storageURL: folder)
+        let sync = ClipboardSyncStore(storageURL: folder.appendingPathComponent("clipboard.json"))
+        let workflow = SavedWorkflow(name: "双采样文生图 · 4K", data: Data(#"{"1":{"class_type":"KSampler","inputs":{"steps":28,"seed":123456,"cfg":7}},"2":{"class_type":"CLIPTextEncode","inputs":{"text":"雨后的海岸，远处的山峰，柔和的自然光"}}}"#.utf8))
+        store.workflows = [workflow]; store.select(workflow.id)
+        var prompt = PanelFieldConfiguration(id: "2.text"); prompt.label = "画面描述"; prompt.control = .multiline
+        var steps = PanelFieldConfiguration(id: "1.steps"); steps.label = "采样步数"
+        var seed = PanelFieldConfiguration(id: "1.seed"); seed.label = "种子"
+        try store.configurePanel([prompt, steps, seed])
+        store.background = testImage()
+        store.canvasRunIssue = nil
+        for tab in [1, 2, 4, 3] {
+            store.activeTab = tab
+            let window = try host(WorkbenchView().environmentObject(store).environmentObject(sync).preferredColorScheme(.dark))
+            XCTAssertTrue(descendants(window).compactMap { $0 as? UIImageView }.allSatisfy { $0.image !== store.background }, "Chat photo leaked into tab \(tab)")
+            if tab == 1 { try capturePreview(window, name: "application") }
+            if tab == 4 { try capturePreview(window, name: "clipboard") }
+            window.isHidden = true
+        }
+    }
+    @MainActor func testPairingScreenRendersNativeGuidanceWithoutEmbeddedWebview() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let sync = ClipboardSyncStore(storageURL: folder.appendingPathComponent("clipboard.json"))
+        let window = try host(ClipboardSettings().environmentObject(sync))
+        defer { window.isHidden = true }
+        XCTAssertFalse(descendants(window).contains { String(describing: type(of: $0)).contains("WebView") })
+        try capturePreview(window, name: "pairing")
+    }
+    @MainActor private func capturePreview(_ window: UIWindow, name: String) throws {
+        let format = UIGraphicsImageRendererFormat(); format.scale = 2
+        let render = UIGraphicsImageRenderer(bounds: window.bounds, format: format).image { _ in
+            XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
+        }
+        let attachment = XCTAttachment(image: render); attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+        // Synthetic fixtures only. Export the native render through the CI log for visual review.
+        print("NATIVE_PREVIEW \(name) \(try XCTUnwrap(render.pngData()).base64EncodedString())")
+    }
     @MainActor func testClipboardHistoryCopiesAndPersistsWithoutEcho() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }

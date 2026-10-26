@@ -4,6 +4,13 @@ import CoreGraphics
 @testable import ComfyWorkbenchNetworking
 
 final class WorkflowExperienceTests: XCTestCase {
+    func testArtworkPanKeepsZoomedPhotoOverViewport() {
+        let picture = CGSize(width: 347, height: 173.5), viewport = CGSize(width: 375, height: 812)
+        XCTAssertEqual(ArtworkMetrics.constrainedPan(CGSize(width: 500, height: 500), image: picture, viewport: viewport, zoom: 1), .zero)
+        let pan = ArtworkMetrics.constrainedPan(CGSize(width: 5000, height: -5000), image: picture, viewport: viewport, zoom: 6)
+        XCTAssertEqual(pan.width, (347 * 6 - 375) / 2)
+        XCTAssertEqual(pan.height, -(173.5 * 6 - 812) / 2)
+    }
     func testArtworkFrameFitsLandscapeAndPortraitWithoutDistorting() {
         let screen = CGSize(width: 347, height: 700)
         let landscape = ArtworkMetrics.fittedSize(image: CGSize(width: 1600, height: 900), available: screen)

@@ -16,7 +16,7 @@ struct GalleryPage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                Text("作品").font(.largeTitle.bold())
+                Text("作品").font(.system(size: 24, weight: .semibold))
                 if store.jobs.allSatisfy({ $0.outputs.isEmpty && $0.text.isEmpty }) {
                     VStack(alignment: .leading, spacing: 14) { Image(systemName: "photo.on.rectangle.angled").font(.largeTitle); Text("生成的作品会出现在这里").font(.title3); Text("图片可设为聊天底图，视频可播放，也可以分享或保存到系统相册。").font(.subheadline).foregroundColor(.secondary) }.padding(24).glass()
                 }

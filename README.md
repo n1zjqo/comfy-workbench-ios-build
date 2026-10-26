@@ -2,7 +2,16 @@
 
 面向 iPhone / iOS 15.0+ 的非官方原生 SwiftUI 客户端，参考 [Mimikkoro1/comfy-workbench-android](https://github.com/Mimikkoro1/comfy-workbench-android) 的直连 ComfyUI 与工作流参数映射思路，提供对话式生成、AI 应用式参数面板及右滑清屏。界面设计参考 [Anthropic frontend-design](https://github.com/anthropics/skills/blob/main/skills/frontend-design/SKILL.md)。
 
-版本 **0.5.0（build 5）** 已通过 [GitHub Actions 构建](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/40296679020)：76 项核心/网络测试及 7 项 iOS 原生测试通过，另有 1 项硬件文件保护检查因模拟器不返回该属性而跳过，未记为通过。使用 Xcode 16.4 / iOS 18.5 SDK 构建 arm64 IPA，最低 iOS 15.0；下载后已核对 SHA-256、版本、Mach-O 和归档完整性。iPhone XS 真机、真实多设备局域网及公网联调尚未完成。
+当前源码 **0.5.1（build 6）**，最低 iOS 15.0；具体构建、测试与真机限制见 VALIDATION.md。
+
+## 0.5.1 页面整理与外网配对
+
+- 聊天图片只出现在创作页。应用、作品、同步、连接使用独立的深色背景，解决图片穿透参数页的问题。
+- 应用页压缩标题、工作流选择与工具区；画布、撤销、重做并为一行，自定义面板与导出放入更多菜单，常用参数更早出现在首屏。
+- 看图支持双指缩放、双击放大/还原以及放大后拖动；图片原比例和原始像素保留，原图自带黑边时可手动放大。
+- 配对流程分为地址检测和配对码两步，显示实际连接状态。首次配对也支持局域网不可达时尝试公网；发送配对码前再次校验检测到的中心。
+- 公网验证访问 /v1/info 检测路径，使用系统默认浏览器完成验证；返回 App 自动重新检测。空首页、404、503、HTML 验证页分别提供可读提示。第三方验证网页本身的可用性仍取决于服务商和手机网络。
+- 新版仍与 Windows Companion 0.5.0 的协议兼容，已有配对与工作流不需重建。
 
 ## 0.5.0 多设备剪贴板
 

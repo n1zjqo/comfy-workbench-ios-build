@@ -7,7 +7,12 @@ struct WorkbenchView: View {
     @State private var photoPicker = false
     var body: some View {
         ZStack {
-            ArtworkBackground(image: store.background, clean: clean)
+            if store.activeTab == 0 {
+                if clean, store.background != nil { Color.black.ignoresSafeArea() }
+                else { ArtworkBackground(image: store.background) }
+            } else {
+                Palette.workspace.ignoresSafeArea()
+            }
             VStack(spacing: 0) {
                 if let config = store.verificationRequired, !clean {
                     HStack(spacing: 12) {
@@ -30,12 +35,12 @@ struct WorkbenchView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 if !clean {
                     HStack(spacing: 0) {
-                        tab(0, "对话", "bubble.left.and.bubble.right")
+                        tab(0, "创作", "bubble.left.and.bubble.right")
                         tab(1, "应用", "slider.horizontal.3")
                         tab(2, "作品", "square.stack")
                         tab(4, "同步", "doc.on.clipboard")
                         tab(3, "连接", "network")
-                    }.padding(.vertical, 7).glass(26).padding(.horizontal, 18).padding(.bottom, 6)
+                    }.padding(.vertical, 5).glass(25).padding(.horizontal, 16).padding(.bottom, 6)
                 }
             }
         }
@@ -65,11 +70,15 @@ struct ChatView: View {
     @Binding var clean: Bool
     @State private var message = ""
     @State private var photoPicker = false
+    @State private var artworkZoomed = false
     @GestureState private var drag: CGFloat = 0
     @FocusState private var focused: Bool
     var body: some View {
         GeometryReader { geo in
             ZStack {
+                if clean, let image = store.background {
+                    FittedArtwork(image: image, isZoomed: $artworkZoomed).ignoresSafeArea()
+                }
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 5) {
@@ -123,7 +132,7 @@ struct ChatView: View {
                     if !focused && !clean && abs(value.translation.width) > abs(value.translation.height) * 1.7 { state = max(0, value.translation.width) }
                 }
                 .onEnded { value in
-                    guard !focused, abs(value.translation.width) > abs(value.translation.height) * 1.7 else { return }
+                    guard !focused, !artworkZoomed, abs(value.translation.width) > abs(value.translation.height) * 1.7 else { return }
                     if !clean && value.translation.width > 85 { toggleClean(true) }
                     else if clean && value.translation.width < -65 { toggleClean(false) }
                 })
@@ -134,6 +143,7 @@ struct ChatView: View {
     }
     private func toggleClean(_ value: Bool) {
         focused = false
+        artworkZoomed = false
         withAnimation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.9)) { clean = value }
     }
 }
@@ -172,7 +182,7 @@ struct ConnectionPage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                Text("连接你的 ComfyUI").font(.largeTitle.bold())
+                Text("连接 ComfyUI").font(.system(size: 24, weight: .semibold))
                 Text("你的创作服务器").font(.title3)
                 VStack(alignment: .leading, spacing: 16) {
                     Text("服务器地址").font(.caption).foregroundColor(.secondary)
@@ -199,7 +209,7 @@ struct ConnectionPage: View {
                 }.padding(20).glass()
                 Divider()
                 Text("Comfy Workbench for iOS").font(.headline)
-                Text("0.5.0 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
+                Text("0.5.1 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
             }.padding(24)
         }.onAppear {
             if let config = store.server { address = config.baseURL; username = config.username; key = config.passwordKey; password = (try? KeychainStore.password(for: key)) ?? "" }

@@ -9,7 +9,7 @@ struct ClipboardPage: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 5) { Text("随手同步").font(.system(size: 28, weight: .semibold)); Text("在另一块屏幕接着用").font(.subheadline).foregroundColor(.white.opacity(0.65)) }
+                    Text("剪贴板").font(.system(size: 24, weight: .semibold))
                     Spacer()
                     Button { settings = true } label: { Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44).glass(16) }.accessibilityLabel("同步连接设置")
                 }
@@ -90,39 +90,139 @@ private struct ClipboardThumbnail: View {
 struct ClipboardSettings: View {
     @EnvironmentObject var sync: ClipboardSyncStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     @State private var lan = ""
     @State private var internet = ""
     @State private var name = UIDevice.current.name
     @State private var code = ""
-    @State private var browser: VerificationPage?
+    @State private var useInternet = true
+    @State private var checking = false
+    @State private var connection: ClipboardConnection?
+    @State private var connectionError: String?
+    @State private var verificationPending = false
+    @State private var loaded = false
     @State private var disconnect = false
     var body: some View {
         NavigationView {
-            Form {
-                Section(header: Text("连接同一个同步中心")) {
-                    TextField("局域网地址，如 http://192.168.1.20:8899", text: $lan).keyboardType(.URL)
-                    TextField("公网 HTTPS 地址（可稍后填写）", text: $internet).keyboardType(.URL)
-                    Text("在同一网络先连局域网；无法直连时尝试公网。地址对应的中心不匹配时，不会发送配对凭据。").font(.caption).foregroundColor(.secondary)
-                    if sync.archive.profile != nil { Button("保存双地址") { Task { await sync.saveAddresses(lan: lan, internet: internet) } }.disabled(sync.busy) }
+            ZStack {
+                Palette.workspace.ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(sync.archive.profile == nil ? "把电脑连到手机" : "连接设置").font(.system(size: 24, weight: .semibold))
+                            Text("先确认地址可用，再输入电脑上的配对码。").font(.subheadline).foregroundColor(.secondary)
+                        }
+                        addressSection
+                        if sync.archive.profile == nil {
+                            pairingSection
+                        } else {
+                            Button {
+                                Task { await sync.saveAddresses(lan: lan, internet: internet) }
+                            } label: { Text("保存连接地址").fontWeight(.semibold).frame(maxWidth: .infinity, minHeight: 48) }
+                                .buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink)
+                                .disabled(sync.busy || checking || connection == nil)
+                            DisclosureGroup("重新配对") { pairingSection.padding(.top, 16) }.font(.subheadline)
+                            Button("断开配对", role: .destructive) { disconnect = true }.frame(minHeight: 44).disabled(sync.busy)
+                        }
+                        Text("电脑同步中心需要保持运行。首次连接只读取历史；自动发送与接收可在同步页单独开启。").font(.caption).foregroundColor(.secondary).lineSpacing(4)
+                    }.padding(20)
                 }
-                Section(header: Text(sync.archive.profile == nil ? "配对设备" : "重新配对")) {
-                    TextField("设备名", text: $name)
-                    TextField("电脑上显示的配对码", text: $code).keyboardType(.numberPad)
-                    Button { Task { await sync.pair(lan: lan, internet: internet, code: code, name: name); if sync.archive.profile != nil { code = "" } } } label: { HStack { Text("配对并连接"); Spacer(); if sync.busy { ProgressView() } } }.disabled(sync.busy || code.isEmpty)
-                    Text("电脑端：连接 → 启动本机中心 → 设备 → 开启配对。配对码限时有效，只能使用一次。").font(.caption).foregroundColor(.secondary)
-                }
-                Section(header: Text("外网验证")) {
-                    Button("打开公网验证页面") { if let url = try? ClipboardEndpoint.url(internet, publicAddress: true) { browser = VerificationPage(url: url) } else { sync.notice = "请先填写有效的公网 HTTPS 地址" } }
-                    Text("DDNSTO 需要验证时在网页完成，再回来重试。公网转发需保持电脑端运行。").font(.caption).foregroundColor(.secondary)
-                }
-                Section(header: Text("内容保留")) { Text("支持文字和 PNG 图片。单条文字最多 256 KB，图片最多 5 MB。历史最多 100 条、32 MB；待发送最多 30 条，超过 7 天请重新发送。首次连接只读取历史，不覆盖当前剪贴板。").font(.caption).foregroundColor(.secondary) }
-                if sync.archive.profile != nil { Section { Button("断开配对并清除本机同步记录", role: .destructive) { disconnect = true }.disabled(sync.busy) } }
-            }.textInputAutocapitalization(.never).autocorrectionDisabled()
-                .navigationTitle("同步连接").navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("完成") { dismiss() } } }
-        }.onAppear { if let profile = sync.archive.profile { lan = profile.lanURL; internet = profile.publicURL; name = profile.deviceName } }
-        .sheet(item: $browser, onDismiss: { sync.retry() }) { page in VerificationBrowser(url: page.url) { browser = nil }.ignoresSafeArea() }
+            }.navigationTitle("连接电脑").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("完成") { dismiss() }.disabled(checking) } }
+        }.navigationViewStyle(.stack).preferredColorScheme(.dark)
+        .onAppear {
+            guard !loaded else { return }; loaded = true
+            if let profile = sync.archive.profile { lan = profile.lanURL; internet = profile.publicURL; name = profile.deviceName; useInternet = !internet.isEmpty }
+        }
+        .onChange(of: lan) { _ in invalidateConnection() }
+        .onChange(of: internet) { _ in invalidateConnection() }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active && verificationPending {
+                verificationPending = false
+                Task { await checkConnection() }
+            }
+        }
         .confirmationDialog("断开配对？", isPresented: $disconnect, titleVisibility: .visible) { Button("断开并清除", role: .destructive) { sync.disconnect() }; Button("取消", role: .cancel) {} } message: { Text("将清除本机同步历史和待发送内容。电脑中心上的记录不受影响。") }
         .alert("同步", isPresented: Binding(get: { sync.notice != nil }, set: { if !$0 { sync.notice = nil } })) { Button("知道了") { sync.notice = nil } } message: { Text(sync.notice ?? "") }
+    }
+
+    private var addressSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("1  电脑地址", systemImage: "network").font(.headline)
+            Picker("当前网络", selection: $useInternet) { Text("外网").tag(true); Text("局域网").tag(false) }
+                .pickerStyle(.segmented).disabled(checking || sync.busy)
+            addressField(useInternet ? "公网 HTTPS 地址" : "局域网地址", placeholder: useInternet ? "https://你的域名" : "http://192.168.1.20:8899", text: useInternet ? $internet : $lan)
+            DisclosureGroup(useInternet ? "添加局域网地址（可选）" : "添加公网地址（可选）") {
+                addressField(useInternet ? "局域网地址" : "公网 HTTPS 地址", placeholder: useInternet ? "http://192.168.1.20:8899" : "https://你的域名", text: useInternet ? $lan : $internet).padding(.top, 12)
+                Text("同时填写后，优先局域网，无法直连时尝试公网。").font(.caption).foregroundColor(.secondary).padding(.top, 8)
+            }.font(.caption).disabled(checking || sync.busy)
+            Button { Task { await checkConnection() } } label: {
+                HStack { if checking { ProgressView() }; Text(checking ? "正在检测…" : "检测连接"); Spacer(); Image(systemName: "arrow.clockwise") }.frame(minHeight: 44)
+            }.disabled(checking || sync.busy || (lan.isEmpty && internet.isEmpty))
+            if let connection = connection {
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("已连接电脑", systemImage: "checkmark.circle.fill").foregroundColor(.mint).font(.subheadline.weight(.medium))
+                    Text(connection.route).font(.caption).foregroundColor(.secondary)
+                }.accessibilityIdentifier("clipboard.connection.ready")
+            }
+            if let connectionError = connectionError {
+                Label(connectionError, systemImage: "exclamationmark.circle").font(.subheadline).foregroundColor(Color(red: 0.96, green: 0.75, blue: 0.56)).fixedSize(horizontal: false, vertical: true)
+            }
+            if !internet.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Divider()
+                Button(action: verifyInBrowser) { Label("打开系统浏览器验证", systemImage: "safari").font(.subheadline).frame(minHeight: 44) }.disabled(checking || sync.busy)
+                Text("DDNSTO 需要验证时使用。验证后返回此处，会自动重新检测；若浏览器仍是空白，先确认域名正确并刷新。").font(.caption).foregroundColor(.secondary).lineSpacing(3)
+            }
+        }.padding(18).background(Palette.surface, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var pairingSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("2  配对电脑", systemImage: "link").font(.headline)
+            if connection == nil { Text("检测连接成功后，即可输入配对码。").font(.subheadline).foregroundColor(.secondary) }
+            VStack(alignment: .leading, spacing: 7) {
+                Text("手机名称").font(.caption).foregroundColor(.secondary)
+                TextField("我的 iPhone", text: $name).padding(12).background(Palette.workspace, in: RoundedRectangle(cornerRadius: 10))
+            }
+            VStack(alignment: .leading, spacing: 7) {
+                Text("电脑上的配对码").font(.caption).foregroundColor(.secondary)
+                TextField("输入配对码", text: $code).keyboardType(.numberPad).font(.system(size: 22, weight: .medium, design: .monospaced)).padding(12).background(Palette.workspace, in: RoundedRectangle(cornerRadius: 10))
+            }
+            Button {
+                guard let connection = connection else { return }
+                Task { await sync.pair(lan: lan, internet: internet, code: code, name: name, expectedHubID: connection.hubId); if sync.archive.profile != nil { code = "" } }
+            } label: {
+                HStack { if sync.busy { ProgressView() }; Text("配对并连接").fontWeight(.semibold) }.frame(maxWidth: .infinity, minHeight: 48)
+            }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink)
+                .disabled(connection == nil || sync.busy || checking || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Text("电脑端进入“设备”，点击“开启配对”。配对码限时有效，仅可使用一次。").font(.caption).foregroundColor(.secondary)
+        }.disabled(checking || sync.busy).textInputAutocapitalization(.never).autocorrectionDisabled()
+    }
+
+    private func addressField(_ title: String, placeholder: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title).font(.caption).foregroundColor(.secondary)
+            TextField(placeholder, text: text).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                .font(.subheadline).padding(12).background(Palette.workspace, in: RoundedRectangle(cornerRadius: 10))
+                .disabled(checking || sync.busy)
+        }
+    }
+    private func invalidateConnection() { connection = nil; connectionError = nil }
+    @MainActor private func checkConnection() async {
+        guard !checking else { return }
+        checking = true; connection = nil; connectionError = nil
+        defer { checking = false }
+        do { connection = try await sync.checkConnection(lan: lan, internet: internet) }
+        catch { connectionError = error.localizedDescription }
+    }
+    private func verifyInBrowser() {
+        do {
+            let url = try ClipboardEndpoint.verificationURL(internet)
+            verificationPending = true
+            openURL(url) { accepted in
+                if !accepted { verificationPending = false; connectionError = "无法打开浏览器，请在 Safari 手动打开已填写的域名后加 /v1/info" }
+            }
+        } catch { connectionError = error.localizedDescription }
     }
 }

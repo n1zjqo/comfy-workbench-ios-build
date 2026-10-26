@@ -47,14 +47,20 @@ final class ClipboardSyncStore: ObservableObject {
         do { var next = archive; if let send = send { next.autoSend = send; changeCount = UIPasteboard.general.changeCount }; if let receive = receive { next.autoReceive = receive }; try commit(next) }
         catch { notice = error.localizedDescription }
     }
-    func pair(lan: String, internet: String, code: String, name: String) async {
+    func checkConnection(lan: String, internet: String) async throws -> ClipboardConnection {
+        guard !busy else { throw ClipboardFailure("正在同步，请稍后检测") }
+        busy = true; defer { busy = false }
+        try validateAddresses(lan, internet)
+        return try await client.probe(lan: lan, internet: internet, expectedHubID: archive.profile?.hubId)
+    }
+    func pair(lan: String, internet: String, code: String, name: String, expectedHubID: String? = nil) async {
         guard !busy else { return }
         guard archive.outbox.isEmpty else { notice = "请先处理待发送内容，再切换中心"; return }
         busy = true; defer { busy = false }
         do {
             try validateAddresses(lan, internet)
             guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ClipboardFailure("请输入设备名") }
-            let credentials = try await client.pair(address: lan.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? internet : lan, code: code, name: name)
+            let credentials = try await client.pair(lan: lan, internet: internet, code: code, name: name, expectedHubID: expectedHubID)
             let profile = ClipboardProfile(lanURL: lan.trimmingCharacters(in: .whitespacesAndNewlines), publicURL: internet.trimmingCharacters(in: .whitespacesAndNewlines), deviceName: name, hubId: credentials.hubId, deviceId: credentials.deviceId)
             try KeychainStore.savePassword(credentials.token, for: profile.tokenKey)
             var next = ClipboardArchive(); next.profile = profile; next.autoSend = archive.autoSend; next.autoReceive = archive.autoReceive

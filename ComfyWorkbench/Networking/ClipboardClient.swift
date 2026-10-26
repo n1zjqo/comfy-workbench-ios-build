@@ -56,6 +56,11 @@ public struct ClipboardBatch: Codable {
 public struct ClipboardCredentials: Codable { public let hubId: String; public let deviceId: String; public let token: String }
 public struct ClipboardReceipt: Codable { public let id: String; public let sequence: Int64 }
 public struct ClipboardHubInfo: Codable { public let hubId: String; public let protocolVersion: Int }
+public struct ClipboardConnection: Equatable {
+    public let url: URL
+    public let hubId: String
+    public let route: String
+}
 public struct ClipboardFailure: LocalizedError {
     public let message: String
     public let status: Int?
@@ -64,6 +69,9 @@ public struct ClipboardFailure: LocalizedError {
 }
 
 public enum ClipboardEndpoint {
+    public static func verificationURL(_ input: String) throws -> URL {
+        try url(input, publicAddress: true).appendingPathComponent("v1/info")
+    }
     public static func url(_ input: String, publicAddress: Bool) throws -> URL {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard var parts = URLComponents(string: value), let host = parts.host, !host.isEmpty, parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil else { throw ClipboardFailure("请填写不含密码和查询参数的完整地址") }
@@ -99,14 +107,40 @@ public actor ClipboardClient {
         session = URLSession(configuration: configuration, delegate: ClipboardRedirectGuard(), delegateQueue: nil)
     }
     public func reset() { cached = nil }
+    // Probe without credentials; pair only once after a reachable center is chosen.
+    public func probe(lan: String, internet: String, expectedHubID: String? = nil) async throws -> ClipboardConnection {
+        let candidates = [(lan, false, "局域网直连"), (internet, true, "公网 HTTPS")].filter { !$0.0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !candidates.isEmpty else { throw ClipboardFailure("请先填写电脑地址") }
+        var failure: Error = ClipboardFailure("无法连接电脑，请检查地址和网络")
+        for (address, isPublic, route) in candidates {
+            let url = try ClipboardEndpoint.url(address, publicAddress: isPublic)
+            do {
+                let info: ClipboardHubInfo = try await call(url, "v1/info", timeout: isPublic ? 8 : 2)
+                guard info.protocolVersion == 1, !info.hubId.isEmpty else { throw ClipboardFailure("此地址不是兼容的同步中心") }
+                if let expectedHubID = expectedHubID, info.hubId != expectedHubID { throw ClipboardFailure("地址指向另一台电脑，请检查域名转发") }
+                return ClipboardConnection(url: url, hubId: info.hubId, route: route)
+            } catch is CancellationError { throw CancellationError() }
+            catch let error as URLError where error.code == .cancelled { throw error }
+            catch let error as ClipboardFailure { failure = error }
+            catch { failure = ClipboardFailure(isPublic ? "公网暂时无法连接，请检查域名转发或在浏览器完成验证" : "无法直连电脑，请确认两台设备在同一局域网") }
+        }
+        throw failure
+    }
+    public func pair(lan: String, internet: String, code: String, name: String, expectedHubID: String? = nil) async throws -> ClipboardCredentials {
+        let connection = try await probe(lan: lan, internet: internet, expectedHubID: expectedHubID)
+        return try await pair(at: connection, code: code, name: name)
+    }
     public func pair(address: String, code: String, name: String) async throws -> ClipboardCredentials {
         let url = try ClipboardEndpoint.url(address, publicAddress: false)
         let info: ClipboardHubInfo = try await call(url, "v1/info", timeout: 3)
         guard info.protocolVersion == 1 else { throw ClipboardFailure("同步中心版本不兼容") }
+        return try await pair(at: ClipboardConnection(url: url, hubId: info.hubId, route: ""), code: code, name: name)
+    }
+    private func pair(at connection: ClipboardConnection, code: String, name: String) async throws -> ClipboardCredentials {
         struct Pair: Encodable { let code: String; let deviceName: String }
         let body = try JSONEncoder().encode(Pair(code: code.trimmingCharacters(in: .whitespacesAndNewlines), deviceName: name.trimmingCharacters(in: .whitespacesAndNewlines)))
-        let credentials: ClipboardCredentials = try await call(url, "v1/pair", body: body)
-        guard credentials.hubId == info.hubId, UUID(uuidString: credentials.deviceId) != nil, credentials.token.count == 64 else { throw ClipboardFailure("配对响应无效，请检查中心地址") }
+        let credentials: ClipboardCredentials = try await call(connection.url, "v1/pair", body: body)
+        guard credentials.hubId == connection.hubId, UUID(uuidString: credentials.deviceId) != nil, credentials.token.count == 64 else { throw ClipboardFailure("配对响应无效，请检查中心地址") }
         cached = nil; return credentials
     }
     public func select(_ profile: ClipboardProfile) async throws -> (URL, String) {
@@ -116,7 +150,7 @@ public actor ClipboardClient {
         for (address, isPublic, label) in [(profile.lanURL, false, "局域网直连"), (profile.publicURL, true, "公网 HTTPS")] where !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             do {
                 let url = try ClipboardEndpoint.url(address, publicAddress: isPublic)
-                let info: ClipboardHubInfo = try await call(url, "v1/info", timeout: 1.8)
+                let info: ClipboardHubInfo = try await call(url, "v1/info", timeout: isPublic ? 8 : 1.8)
                 guard info.hubId == profile.hubId, info.protocolVersion == 1 else { reason = "地址指向另一台中心，已停止向它发送凭据"; continue }
                 cached = (url, label, key, Date()); return (url, label)
             } catch let error as ClipboardFailure { reason = error.message }
@@ -140,8 +174,10 @@ public actor ClipboardClient {
         if let body = body { request.httpMethod = "POST"; request.httpBody = body; request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (data, response) = try await session.data(for: request)
         guard data.count <= 20 * 1024 * 1024, let http = response as? HTTPURLResponse else { throw ClipboardFailure("同步响应过大或无效") }
-        guard !(300..<400).contains(http.statusCode) else { throw ClipboardFailure("地址跳转或需要网页验证，请检查地址后重试") }
-        guard http.mimeType == "application/json" else { throw ClipboardFailure("返回了网页，请检查地址或完成外网验证") }
+        guard !(300..<400).contains(http.statusCode) else { throw ClipboardFailure("需要网页验证，请打开系统浏览器验证后返回检测", status: http.statusCode) }
+        if http.statusCode == 404 { throw ClipboardFailure("未找到同步接口（404），请确认域名转发到电脑同步中心的 8899 端口", status: 404) }
+        if (500...599).contains(http.statusCode) { throw ClipboardFailure("服务暂不可用（\(http.statusCode)），请检查电脑同步中心和域名转发", status: http.statusCode) }
+        guard http.mimeType == "application/json" else { throw ClipboardFailure("返回了网页，请打开系统浏览器完成验证，再回来检测", status: http.statusCode) }
         guard (200..<300).contains(http.statusCode) else {
             let reason = (try? JSONDecoder().decode(ClipboardErrorBody.self, from: data).error) ?? "同步请求失败"
             throw ClipboardFailure(reason, status: http.statusCode)

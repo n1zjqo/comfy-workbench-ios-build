@@ -2,6 +2,52 @@ import XCTest
 @testable import ComfyWorkbenchNetworking
 
 final class ClipboardSyncTests: XCTestCase {
+    func testVerificationUsesInfoPathInsteadOfBlankHomepage() throws {
+        XCTAssertEqual(try ClipboardEndpoint.verificationURL("https://example.com").absoluteString, "https://example.com/v1/info")
+        XCTAssertEqual(try ClipboardEndpoint.verificationURL("https://example.com/hub/").absoluteString, "https://example.com/hub/v1/info")
+        XCTAssertThrowsError(try ClipboardEndpoint.verificationURL("http://example.com"))
+    }
+    func testPairingFallsBackBeforeSendingCodeAndNeverRetriesPost() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ClipboardURLProtocol.self]
+        let seen = RequestLog()
+        ClipboardURLProtocol.handler = { request in
+            seen.append(request)
+            if request.url!.host == "192.168.1.20" { throw URLError(.cannotConnectToHost) }
+            if request.url!.path.hasSuffix("info") { return (200, "application/json", Data(#"{"hubId":"expected","protocolVersion":1}"#.utf8)) }
+            return (200, "application/json", Data("{\"hubId\":\"expected\",\"deviceId\":\"\(UUID().uuidString)\",\"token\":\"\(String(repeating: "a", count: 64))\"}".utf8))
+        }
+        let client = ClipboardClient(configuration: config)
+        let credentials = try await client.pair(lan: "http://192.168.1.20:8899", internet: "https://example.com", code: "123456", name: "Test", expectedHubID: "expected")
+        XCTAssertEqual(credentials.hubId, "expected")
+        XCTAssertEqual(seen.requests.filter { $0.httpMethod == "POST" }.map { $0.url!.host! }, ["example.com"])
+        XCTAssertTrue(seen.requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == nil })
+        ClipboardURLProtocol.handler = { request in
+            seen.append(request)
+            if request.url!.path.hasSuffix("info") { return (200, "application/json", Data(#"{"hubId":"expected","protocolVersion":1}"#.utf8)) }
+            return (401, "application/json", Data(#"{"error":"配对码已失效"}"#.utf8))
+        }
+        do { _ = try await client.pair(lan: "http://192.168.1.20:8899", internet: "https://example.com", code: "bad", name: "Test"); XCTFail("Invalid pairing code accepted") }
+        catch { XCTAssertEqual((error as? ClipboardFailure)?.status, 401) }
+        XCTAssertEqual(seen.requests.filter { $0.httpMethod == "POST" }.count, 2, "A failed POST must not be retried against another center")
+    }
+    func testRecheckRejectsChangedHubWithoutSendingPairingCode() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ClipboardURLProtocol.self]
+        let seen = RequestLog()
+        ClipboardURLProtocol.handler = { request in seen.append(request); return (200, "application/json", Data(#"{"hubId":"changed","protocolVersion":1}"#.utf8)) }
+        let client = ClipboardClient(configuration: config)
+        do { _ = try await client.pair(lan: "", internet: "https://example.com", code: "123456", name: "Test", expectedHubID: "original"); XCTFail("Hub changed after check") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("另一台")) }
+        XCTAssertTrue(seen.requests.allSatisfy { $0.httpMethod == "GET" })
+    }
+    func testProbeExplainsHTML404AndUnavailableService() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ClipboardURLProtocol.self]
+        let client = ClipboardClient(configuration: config)
+        for (status, fragment) in [(200, "网页"), (404, "8899"), (503, "503"), (302, "验证")] {
+            ClipboardURLProtocol.handler = { _ in (status, "text/html", Data("<html></html>".utf8)) }
+            do { _ = try await client.probe(lan: "", internet: "https://example.com"); XCTFail("Accepted an invalid response") }
+            catch { XCTAssertTrue(error.localizedDescription.contains(fragment)); XCTAssertEqual((error as? ClipboardFailure)?.status, status) }
+        }
+    }
     private func batch(_ sequence: Int64, text: String = "hello", more: Bool = false, reset: Bool = false) throws -> ClipboardBatch {
         let json: [String: Any] = ["items": [["id": UUID().uuidString, "sequence": sequence, "deviceId": "computer", "deviceName": "Test computer", "kind": "text", "text": text, "createdAt": 1_700_000_000_000]], "cursor": sequence, "hasMore": more, "reset": reset]
         return try JSONDecoder().decode(ClipboardBatch.self, from: JSONSerialization.data(withJSONObject: json))

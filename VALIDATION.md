@@ -1,15 +1,9 @@
-# 0.5.0 验证记录
+# 0.5.1 验证记录
 
-- 构建提交：`5abb5d5b98de4fb60a2655b4c4a6bf0ac7b04139`。
-- [GitHub Actions 40296679020](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/40296679020)：成功。
-- Xcode 16.4，iOS 18.5 SDK；原生测试在 iOS 18.5 / iPhone 16 Pro 模拟器运行，视图检查使用 375×812 尺寸。
-- 76 项核心/网络测试通过，7 项原生测试通过，零失败。硬件文件保护检查单独跳过 1 项：模拟器没有返回保护属性，需在真机核验，不能视为已验证加密。
-- 新增检查覆盖局域网优先、公网回退、中心不匹配时不发送凭据、HTML 验证页处理、剪贴板持久化、历史分页、队列上限和重复内容抑制。
-- IPA：0.5.0 / build 5，arm64，最低 iOS 15.0。macOS CI 校验 ad-hoc 签名；下载后独立核对 SHA-256、Mach-O、版本、ZIP CRC 和未混入 XCTest。
-- IPA SHA-256：`dd8d90f5eaf326ef0da1158c5fe8d8243e27c957021c88e22951e188ed2beb8d`。
-- Windows Companion：.NET 10 Release x64，零警告；30 项本地断言通过。已渲染并检查原生界面示例。此项目源文件不包含 Windows 伴侣程序，交付包另附。
-- 2026-10-26 经用户明确批准，使用交付版 Windows 程序在 `127.0.0.1:18999` 完成本机 HTTP 联调：5 项检查通过（设备配对、虚构文字收发、重试去重、设备移除、拒绝带 Origin 的网页请求）。测试结束进程退出，端口无残留监听。
-- 正式同步中心尚未启动，未读取真实剪贴板，未修改防火墙或替换旧 LanAI。
-- 未完成 iPhone XS / iOS 15 / TrollStore 的安装、性能与系统剪贴板实测；未配置公网 HTTPS 域名，未做真实内外网切换和 DDNSTO 验证联调。
+源码版本 0.5.1 / build 6，最低 iOS 15.0。本次修正页面背景隔离、紧凑应用面板、看图缩放、原生配对检测和系统浏览器验证入口。
 
-实现使用 [Apple 的完整文件保护写入选项](https://developer.apple.com/documentation/uikit/encrypting-your-app-s-files)。[文件保护属性的值类型](https://developer.apple.com/documentation/foundation/fileattributekey/protectionkey)为 NSString；锁屏后的实际保护行为需要物理设备测试。
+- 本地结构检查已通过；Windows 无法运行 Xcode，编译与 XCTest 交给现有 macOS GitHub Actions。
+- 新增回归覆盖：非聊天页不渲染聊天图片、375×812 原生应用/同步/配对页面截图、图片缩放边界、验证路径、局域网失败时首次公网配对、检测后中心改变时拒绝发送配对码、配对 POST 不向其他中心重试，以及 HTML/404/503/302 提示。
+- iPhone XS / iOS 15 真机上的第三方验证网页、缩放手势和系统剪贴板仍需实测。第三方网页的 WebKit 兼容性不能由原生检测替代验证。
+- 历史基线 0.5.0：76 项核心/网络测试、7 项原生测试通过；1 项硬件文件保护测试在模拟器跳过，不视为真机加密已验证。Windows 伴侣 30 项断言及 5 项获批的本机 HTTP 联调已通过。
+- 本次只更新 iOS 交付物，不替换正在运行的 Windows 同步中心。

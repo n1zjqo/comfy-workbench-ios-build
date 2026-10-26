@@ -27,7 +27,7 @@ struct ApplicationPanel: View {
                     if index < items.count - 1 { Divider().padding(.horizontal, 18) }
                 }
             }
-        }.background(Palette.ink.opacity(0.92), in: RoundedRectangle(cornerRadius: 20)).clipShape(RoundedRectangle(cornerRadius: 20))
+        }.background(Palette.surface, in: RoundedRectangle(cornerRadius: 18)).clipShape(RoundedRectangle(cornerRadius: 18))
     }
 }
 

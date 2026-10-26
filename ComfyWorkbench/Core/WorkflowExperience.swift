@@ -26,6 +26,11 @@ public struct CanvasViewport: Codable, Equatable {
 }
 
 public enum ArtworkMetrics {
+    public static func constrainedPan(_ proposed: CGSize, image: CGSize, viewport: CGSize, zoom: CGFloat) -> CGSize {
+        let x = max(0, (image.width * zoom - viewport.width) / 2)
+        let y = max(0, (image.height * zoom - viewport.height) / 2)
+        return CGSize(width: min(x, max(-x, proposed.width)), height: min(y, max(-y, proposed.height)))
+    }
     public static func fittedSize(image: CGSize, available: CGSize) -> CGSize {
         guard image.width > 0, image.height > 0, available.width > 0, available.height > 0,
               image.width.isFinite, image.height.isFinite, available.width.isFinite, available.height.isFinite else { return .zero }

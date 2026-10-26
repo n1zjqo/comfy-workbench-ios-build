@@ -48,6 +48,8 @@ struct WorkflowPicker: UIViewControllerRepresentable {
 }
 
 enum Palette {
+    static let workspace = Color(red: 17/255, green: 28/255, blue: 38/255)
+    static let surface = Color(red: 27/255, green: 45/255, blue: 58/255)
     static let ink = Color(red: 0.09, green: 0.17, blue: 0.23)
     static let paper = Color(red: 0.93, green: 0.95, blue: 0.96)
     static let sea = Color(red: 0.25, green: 0.42, blue: 0.48)
@@ -122,14 +124,41 @@ struct ArtworkImageSurface: UIViewRepresentable {
 struct FittedArtwork: View {
     let image: UIImage
     var margin = CGSize(width: 28, height: 112)
+    @Binding var isZoomed: Bool
+    @State private var zoom: CGFloat = 1
+    @State private var pan = CGSize.zero
+    @GestureState private var pinch: CGFloat = 1
+    @GestureState private var drag = CGSize.zero
+    init(image: UIImage, margin: CGSize = CGSize(width: 28, height: 112), isZoomed: Binding<Bool> = .constant(false)) {
+        self.image = image; self.margin = margin; _isZoomed = isZoomed
+    }
     var body: some View {
         GeometryReader { geo in
             let size = ArtworkMetrics.fittedSize(image: image.size, available: CGSize(width: max(1, geo.size.width - margin.width), height: max(1, geo.size.height - margin.height)))
+            let scale = min(8, max(1, zoom * pinch))
+            let offset = ArtworkMetrics.constrainedPan(CGSize(width: pan.width + drag.width, height: pan.height + drag.height), image: size, viewport: geo.size, zoom: scale)
             ZStack {
                 Color.black
                 Image(uiImage: image).resizable().frame(width: size.width, height: size.height)
                     .clipShape(GlassContour(radius: 12)).overlay(CrystalFrame().frame(width: size.width, height: size.height))
-            }.frame(width: geo.size.width, height: geo.size.height)
+                    .scaleEffect(scale).offset(offset)
+            }.frame(width: geo.size.width, height: geo.size.height).clipped().contentShape(Rectangle())
+                .gesture(MagnificationGesture().updating($pinch) { value, state, _ in state = value }
+                    .onEnded { value in
+                        zoom = min(8, max(1, zoom * value))
+                        pan = ArtworkMetrics.constrainedPan(pan, image: size, viewport: geo.size, zoom: zoom)
+                    })
+                .simultaneousGesture(DragGesture(minimumDistance: 8)
+                    .updating($drag) { value, state, _ in if zoom > 1 { state = value.translation } }
+                    .onEnded { value in
+                        if zoom > 1 { pan = ArtworkMetrics.constrainedPan(CGSize(width: pan.width + value.translation.width, height: pan.height + value.translation.height), image: size, viewport: geo.size, zoom: zoom) }
+                    })
+                .onTapGesture(count: 2) { zoom = zoom > 1 ? 1 : min(8, max(2, max(geo.size.height / max(1, size.height), geo.size.width / max(1, size.width)))); pan = .zero }
+                .accessibilityLabel("图片，可双指缩放、双击放大或还原")
+                .accessibilityAction(named: "放大") { zoom = min(8, zoom * 2) }
+                .accessibilityAction(named: "还原") { zoom = 1; pan = .zero }
+                .onChange(of: geo.size) { _ in pan = .zero }
+                .onChange(of: zoom) { isZoomed = $0 > 1 }
         }
     }
 }

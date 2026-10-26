@@ -21,9 +21,9 @@ struct WorkflowPage: View {
     }
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    VStack(alignment: .leading, spacing: 4) { Text("我的 AI 应用").font(.largeTitle.bold()); Text("让工作流变得顺手").font(.subheadline).foregroundColor(.secondary) }
+                    Text("应用").font(.system(size: 24, weight: .semibold))
                     Spacer()
                     Menu {
                         Button { importing = true } label: { Label("从文件导入", systemImage: "doc.badge.plus") }
@@ -41,12 +41,13 @@ struct WorkflowPage: View {
                 if store.workflows.isEmpty { emptyState }
                 else {
                     workflowSelector
-                    EditHistoryBar()
-                    HStack(spacing: 12) {
-                        Button { graph = true } label: { Label("打开画布", systemImage: "point.3.connected.trianglepath.dotted").font(.caption).frame(minHeight: 44) }.disabled(store.canvas == nil)
+                    HStack(spacing: 4) {
+                        Button { graph = true } label: { Label("画布", systemImage: "point.3.connected.trianglepath.dotted").font(.subheadline.weight(.medium)).padding(.horizontal, 14).frame(height: 44).background(Palette.surface, in: RoundedRectangle(cornerRadius: 12)) }.disabled(store.canvas == nil)
                         Spacer()
-                        Button { manageFields = true } label: { Label("配置面板", systemImage: "slider.horizontal.3").font(.caption).frame(minHeight: 44) }
+                        Button { store.undoEdit() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 44, height: 44) }.accessibilityLabel("撤销").disabled(!store.canUndo || store.busy)
+                        Button { store.redoEdit() } label: { Image(systemName: "arrow.uturn.forward").frame(width: 44, height: 44) }.accessibilityLabel("重做").disabled(!store.canRedo || store.busy)
                         Menu {
+                            Button { manageFields = true } label: { Label("自定义面板", systemImage: "slider.horizontal.3") }
                             Button("导出 API JSON") {
                                 do { if let doc = store.document { exportFile = WorkflowFile(data: try doc.promptData(prettyPrinted: true)); exporting = true } }
                                 catch { store.error = error.localizedDescription }
@@ -64,23 +65,32 @@ struct WorkflowPage: View {
                             Button("连接并检查运行条件") { Task { await store.prepareCanvas() } }.frame(minHeight: 44).disabled(store.busy)
                         }.padding(16).glass(18)
                     }
-                    Picker("参数范围", selection: $allParameters) { Text("应用参数").tag(false); Text("全部参数").tag(true) }.pickerStyle(.segmented)
+                    Picker("参数范围", selection: $allParameters) { Text("常用参数").tag(false); Text("全部参数").tag(true) }.pickerStyle(.segmented)
                     if allParameters { TextField("搜索参数或节点", text: $search).padding(12).background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12)) }
-                    if fields.isEmpty { Text("点“配置面板”选择你常用的参数。全部参数仍然可以查看。").font(.subheadline).foregroundColor(.secondary).padding(.vertical, 25) }
+                    if fields.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(allParameters ? "没有匹配的参数" : "选择常用参数，组成自己的应用").font(.subheadline).foregroundColor(.secondary)
+                            if !allParameters { Button("选择参数") { manageFields = true }.frame(minHeight: 44) }
+                        }.padding(.vertical, 16)
+                    }
                     if allParameters {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(fields) { field in
                                 Button { editing = field } label: { ParameterRow(field: field) }.buttonStyle(.plain)
                                 Divider().padding(.leading, 16)
                             }
-                        }.background(Palette.ink.opacity(0.92), in: RoundedRectangle(cornerRadius: 20)).clipShape(RoundedRectangle(cornerRadius: 20))
+                        }.background(Palette.surface, in: RoundedRectangle(cornerRadius: 18)).clipShape(RoundedRectangle(cornerRadius: 18))
                     } else { ApplicationPanel { editing = $0 } }
-                    if let count = store.canvas?.fields.count { Text("共 \(count) 个参数。也可以打开画布，点击节点编辑。").font(.caption).foregroundColor(.secondary) }
+                    HStack {
+                        Label("更改自动保存", systemImage: "checkmark.circle").font(.caption2).foregroundColor(.secondary)
+                        Spacer()
+                        Button("自定义面板") { manageFields = true }.font(.caption).frame(minHeight: 44)
+                    }
                     Button { Task { await store.submit() } } label: {
                         HStack { if store.busy { ProgressView() }; Text("生成作品").font(.headline); Spacer(); Image(systemName: "sparkles") }.padding(.horizontal, 20).frame(height: 54)
                     }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink).disabled(store.busy || store.document == nil)
                 }
-            }.padding(24).padding(.bottom, 12)
+            }.padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 20)
         }
         .sheet(isPresented: $importing) {
             WorkflowPicker { result in
@@ -109,14 +119,14 @@ struct WorkflowPage: View {
             Button("从文件导入…") { importing = true }
             Button("从服务器读取…") { browsingServer = true }
         } label: {
-            HStack(alignment: .center, spacing: 14) {
-                Image(systemName: "square.stack.3d.up").font(.system(size: 25)).frame(width: 50, height: 54).background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 15))
+            HStack(alignment: .center, spacing: 12) {
+                Image(systemName: "square.stack.3d.up").font(.system(size: 20)).foregroundColor(Palette.paper.opacity(0.75))
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(store.selected?.name ?? "选择工作流").font(.headline).multilineTextAlignment(.leading).lineLimit(2)
-                    Text("\(store.canvas?.nodes.count ?? 0) 个节点 · \(store.canvas?.links.count ?? 0) 条连接").font(.caption).foregroundColor(.secondary)
+                    Text(store.selected?.name ?? "选择工作流").font(.system(size: 16, weight: .medium)).multilineTextAlignment(.leading).lineLimit(2)
+                    Text("\(store.canvas?.nodes.count ?? 0) 个节点").font(.caption).foregroundColor(.secondary)
                 }
                 Spacer(minLength: 0); Image(systemName: "chevron.down").font(.caption)
-            }.padding(17).glass(23)
+            }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(Palette.surface, in: RoundedRectangle(cornerRadius: 16))
         }.buttonStyle(.plain)
     }
     private var emptyState: some View {
