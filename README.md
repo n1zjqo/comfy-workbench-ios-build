@@ -2,7 +2,7 @@
 
 面向 iPhone / iOS 15.0+ 的非官方原生 SwiftUI 客户端，参考 [Mimikkoro1/comfy-workbench-android](https://github.com/Mimikkoro1/comfy-workbench-android) 的直连 ComfyUI 与工作流参数映射思路，提供对话式生成、AI 应用式参数面板及右滑清屏。界面设计参考 [Anthropic frontend-design](https://github.com/anthropics/skills/blob/main/skills/frontend-design/SKILL.md)。
 
-版本 **0.5.0（build 5）**：以现有 App 为主，加入全新 LanAI Companion 同步协议。0.5.0 正在进行 macOS 编译与测试；此前 0.4.0 的 74 项自动检查已通过，不能代替本版验证或 iPhone XS 真机验收。
+版本 **0.5.0（build 5）** 已通过 [GitHub Actions 构建](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/40296679020)：76 项核心/网络测试及 7 项 iOS 原生测试通过，另有 1 项硬件文件保护检查因模拟器不返回该属性而跳过，未记为通过。使用 Xcode 16.4 / iOS 18.5 SDK 构建 arm64 IPA，最低 iOS 15.0；下载后已核对 SHA-256、版本、Mach-O 和归档完整性。iPhone XS 真机、真实多设备局域网及公网联调尚未完成。
 
 ## 0.5.0 多设备剪贴板
 
