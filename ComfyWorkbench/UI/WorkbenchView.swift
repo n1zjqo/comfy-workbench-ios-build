@@ -3,10 +3,11 @@ import UniformTypeIdentifiers
 
 struct WorkbenchView: View {
     @EnvironmentObject var store: WorkbenchStore
+    @EnvironmentObject var strata: StrataStore
     @State private var clean = false
     var body: some View {
         ZStack {
-            if store.activeTab == 0 {
+            if store.activeTab == 0 && !strata.assistantSelected {
                 if clean, store.background != nil { Color.black.ignoresSafeArea() }
                 else { ArtworkBackground(image: store.background) }
             } else {
@@ -25,11 +26,11 @@ struct WorkbenchView: View {
                 }
                 Group {
                     switch store.activeTab {
-                    case 0: ChatView(clean: $clean)
+                    case 0: CreationPage(clean: $clean)
                     case 1: WorkflowPage()
                     case 2: GalleryPage()
                     case 4: ClipboardPage()
-                    default: ConnectionPage()
+                    default: PlacesConnectionPage()
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 if !clean {
@@ -45,9 +46,9 @@ struct WorkbenchView: View {
         }
         .statusBar(hidden: clean)
         .tint(Palette.paper)
-        .alert("提示", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) {
-            Button("知道了", role: .cancel) { store.error = nil }
-        } message: { Text(store.error ?? "") }
+        .alert("提示", isPresented: Binding(get: { store.error != nil || strata.notice != nil }, set: { if !$0 { store.error = nil; strata.notice = nil } })) {
+            Button("知道了", role: .cancel) { store.error = nil; strata.notice = nil }
+        } message: { Text(store.error ?? strata.notice ?? "") }
         .onChange(of: store.activeTab) { _ in clean = false }
         .sheet(item: $store.verificationPage, onDismiss: { Task { await store.finishVerification() } }) { page in
             VerificationBrowser(url: page.url) { store.verificationPage = nil }.ignoresSafeArea()
@@ -175,6 +176,7 @@ struct JobBubble: View {
 struct ConnectionPage: View {
     @EnvironmentObject var store: WorkbenchStore
     @State private var address = ""
+    @State private var internet = ""
     @State private var username = ""
     @State private var password = ""
     @State private var key = UUID().uuidString
@@ -186,32 +188,33 @@ struct ConnectionPage: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("服务器地址").font(.caption).foregroundColor(.secondary)
                     TextField("http://192.168.1.20:8188", text: $address).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled().padding(12).background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+                    TextField("公网 HTTPS（选填，自动切换）", text: $internet).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled().padding(12).background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
                     TextField("Basic Auth 用户名（如有）", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled().padding(.vertical, 8)
                     SecureField("密码（如有）", text: $password).padding(.vertical, 8)
                     Button {
-                        let config = ServerConfig(baseURL: address, username: username, passwordKey: key)
+                        let config = ServerConfig(baseURL: address, username: username, passwordKey: key, publicURL: internet.isEmpty ? nil : internet, serviceID: store.server?.serviceID)
                         Task { await store.connect(config: config, password: password) }
                     } label: { HStack { if store.busy { ProgressView() }; Text("测试连接并保存").fontWeight(.semibold) }.frame(maxWidth: .infinity).frame(height: 48) }
                         .buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink).disabled(store.busy)
                     Text(store.connectionStatus).font(.caption).foregroundColor(.secondary)
                 }.padding(20).glass()
-                Text("填写手机可以访问的 ComfyUI 地址。保存前会读取节点定义，为模型列表和参数范围提供依据。").font(.subheadline).foregroundColor(.secondary)
+                Text("只填一个地址可继续使用现有服务。填写内外网双地址后，需服务器身份节点确认两条线路属于同一台电脑，才会自动切换。").font(.subheadline).foregroundColor(.secondary)
                 Text("离开 App 后，已提交的任务继续在服务器上运行。回到 App 会重新查询队列与结果。").font(.subheadline).foregroundColor(.secondary)
                 VStack(alignment: .leading, spacing: 12) {
                     Label("外网访问 · DDNSTO", systemImage: "globe").font(.headline)
                     Text("在上方填写你的 HTTPS 域名。需要登录验证时，打开网页完成验证，再点“完成”返回。").font(.subheadline).foregroundColor(.secondary)
                     Button {
-                        store.beginVerification(config: ServerConfig(baseURL: address, username: username, passwordKey: key), password: password)
+                        store.beginVerification(config: ServerConfig(baseURL: address, username: username, passwordKey: key, publicURL: internet.isEmpty ? nil : internet, serviceID: store.server?.serviceID), password: password)
                     } label: { Label("打开网页验证", systemImage: "arrow.up.forward.app").frame(maxWidth: .infinity, minHeight: 44) }
                     .buttonStyle(.bordered).disabled(store.busy || address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     Text("返回后只检查连接和查询任务。更换网络后可能需要再次验证；网页和 App 应使用相同网络出口。").font(.caption).foregroundColor(.secondary)
                 }.padding(20).glass()
                 Divider()
                 Text("Comfy Workbench for iOS").font(.headline)
-                Text("0.5.2 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
+                Text("0.6.0 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
             }.padding(24)
         }.onAppear {
-            if let config = store.server { address = config.baseURL; username = config.username; key = config.passwordKey; password = (try? KeychainStore.password(for: key)) ?? "" }
+            if let config = store.server { address = config.baseURL; internet = config.publicURL ?? ""; username = config.username; key = config.passwordKey; password = (try? KeychainStore.password(for: key)) ?? "" }
         }
     }
 }

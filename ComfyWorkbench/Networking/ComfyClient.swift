@@ -4,11 +4,15 @@ public struct ServerConfig: Codable, Equatable, Sendable {
     public var baseURL: String
     public var username: String
     public var passwordKey: String
+    public var publicURL: String?
+    public var serviceID: String?
 
-    public init(baseURL: String = "", username: String = "", passwordKey: String = UUID().uuidString) {
+    public init(baseURL: String = "", username: String = "", passwordKey: String = UUID().uuidString, publicURL: String? = nil, serviceID: String? = nil) {
         self.baseURL = baseURL
         self.username = username
         self.passwordKey = passwordKey
+        self.publicURL = publicURL
+        self.serviceID = serviceID
     }
 
     public func validatedBaseURL() throws -> URL {
@@ -146,6 +150,56 @@ public actor ComfyClient {
     private var reader: Task<Void, Never>?
     private var continuation: AsyncThrowingStream<ComfyEvent, Error>.Continuation?
     private var streamID: UUID?
+    private var selectedRoute: URL?
+    private var routeCheckedAt = Date.distantPast
+
+    public func pairRoutes() async throws -> String? {
+        guard let internet = config.publicURL, !internet.isEmpty else { return nil }
+        let (_, identity) = try await chooseRoute(expected: config.serviceID)
+        return identity
+    }
+
+    private func chooseRoute(expected: String?) async throws -> (URL, String) {
+        var last: Error = ComfyAPIError(message: "无法连接办公室 ComfyUI")
+        for (address, internet) in [(config.baseURL, false), (config.publicURL ?? "", true)] where !address.isEmpty {
+            do {
+                let root = try ClipboardEndpoint.url(address, publicAddress: internet)
+                var probe = URLRequest(url: root.appendingPathComponent("workbench/identity"))
+                probe.timeoutInterval = internet ? 8 : 2
+                let (data, response) = try await session.data(for: probe)
+                guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+                      response.mimeType == "application/json", data.count < 4096,
+                      let info = try JSONSerialization.jsonObject(with: data) as? [String: String], info["service"] == "comfy-workbench",
+                      let id = info["serverId"], UUID(uuidString: id) != nil else {
+                    throw ComfyAPIError(message: "双地址切换需要服务器身份接口；请部署身份节点，或仅填写一个地址。若公网返回验证页，请先完成验证。", requiresBrowserVerification: internet)
+                }
+                guard expected == nil || id == expected else { throw ComfyAPIError(message: "地址对应另一台 ComfyUI，未发送凭据或任务") }
+                return (root, id)
+            } catch is CancellationError { throw CancellationError() }
+            catch { last = error }
+        }
+        throw last
+    }
+
+    private func routed(_ request: URLRequest) async throws -> URLRequest {
+        guard let internet = config.publicURL, !internet.isEmpty else { return request }
+        guard let identity = config.serviceID else { throw ComfyAPIError(message: "请先检测并保存 ComfyUI 双地址") }
+        if selectedRoute == nil || Date().timeIntervalSince(routeCheckedAt) >= 5 {
+            let (root, _) = try await chooseRoute(expected: identity)
+            selectedRoute = root; routeCheckedAt = Date()
+        }
+        guard let root = selectedRoute, let originalURL = request.url,
+              var parts = URLComponents(url: originalURL, resolvingAgainstBaseURL: false),
+              let selected = URLComponents(url: root, resolvingAgainstBaseURL: false),
+              let base = URLComponents(url: try config.validatedBaseURL(), resolvingAgainstBaseURL: false) else { throw ComfyAPIError(message: "连接地址无效") }
+        let prefix = base.percentEncodedPath.hasSuffix("/") ? String(base.percentEncodedPath.dropLast()) : base.percentEncodedPath
+        guard parts.percentEncodedPath.hasPrefix(prefix + "/") else { throw ComfyAPIError(message: "请求路径无效") }
+        let suffix = String(parts.percentEncodedPath.dropFirst(prefix.count + 1))
+        parts.scheme = selected.scheme; parts.host = selected.host; parts.port = selected.port
+        parts.percentEncodedPath = selected.percentEncodedPath + suffix
+        var result = request; result.url = parts.url
+        return result
+    }
 
     public init(config: ServerConfig, password: String? = nil, sessionConfiguration: URLSessionConfiguration? = nil) {
         self.config = config
@@ -408,40 +462,35 @@ public actor ComfyClient {
         disconnectEvents()
         let token = UUID()
         return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(128)) { stream in
-            do {
-                guard !clientID.isEmpty else { throw ComfyAPIError(message: "缺少客户端标识。") }
-                var socketRequest = try request(path: ["ws"], query: [URLQueryItem(name: "clientId", value: clientID)])
-                guard let url = socketRequest.url, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
-                    throw ComfyAPIError(message: "WebSocket 地址无效。")
-                }
-                components.scheme = components.scheme?.lowercased() == "https" ? "wss" : "ws"
-                socketRequest.url = components.url
-                socketRequest.timeoutInterval = 30
-                let socket = session.webSocketTask(with: socketRequest)
-                self.socket = socket
-                self.continuation = stream
-                self.streamID = token
-                socket.maximumMessageSize = 32 * 1024 * 1024
-                socket.resume()
-                self.reader = Task { [weak self] in
-                    do {
-                        while !Task.isCancelled {
-                            let message = try await socket.receive()
-                            if let event = try Self.parseEvent(message) { stream.yield(event) }
-                        }
-                        stream.finish()
-                    } catch {
-                        if Task.isCancelled { stream.finish() }
-                        else { stream.finish(throwing: error) }
+            self.continuation = stream
+            self.streamID = token
+            self.reader = Task {
+                do {
+                    guard !clientID.isEmpty else { throw ComfyAPIError(message: "缺少客户端标识。") }
+                    var socketRequest = try await routed(request(path: ["ws"], query: [URLQueryItem(name: "clientId", value: clientID)]))
+                    try Task.checkCancellation()
+                    guard self.streamID == token, let url = socketRequest.url,
+                          var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw CancellationError() }
+                    components.scheme = components.scheme?.lowercased() == "https" ? "wss" : "ws"
+                    socketRequest.url = components.url
+                    socketRequest.timeoutInterval = 30
+                    let socket = session.webSocketTask(with: socketRequest)
+                    self.socket = socket
+                    socket.maximumMessageSize = 32 * 1024 * 1024
+                    socket.resume()
+                    while !Task.isCancelled {
+                        let message = try await socket.receive()
+                        if let event = try Self.parseEvent(message) { stream.yield(event) }
                     }
-                    await self?.finishEvents(token: token)
+                    stream.finish()
+                } catch {
+                    if Task.isCancelled { stream.finish() }
+                    else { selectedRoute = nil; stream.finish(throwing: error) }
                 }
-                stream.onTermination = { @Sendable [weak self] _ in
-                    socket.cancel(with: .goingAway, reason: nil)
-                    Task { await self?.finishEvents(token: token) }
-                }
-            } catch {
-                stream.finish(throwing: error)
+                self.finishEvents(token: token)
+            }
+            stream.onTermination = { @Sendable [weak self] _ in
+                Task { await self?.finishEvents(token: token) }
             }
         }
     }
@@ -487,11 +536,15 @@ public actor ComfyClient {
 
     private func perform(_ request: URLRequest) async throws -> Data {
         try Task.checkCancellation()
-        let (data, response) = try await session.data(for: request)
+        let request = try await routed(request)
+        let data: Data, response: URLResponse
+        do { (data, response) = try await session.data(for: request) }
+        catch { selectedRoute = nil; throw error } // Never replay a possibly accepted POST on the other route.
         guard let response = response as? HTTPURLResponse else { throw ComfyAPIError(message: "服务器没有返回 HTTP 响应。") }
         let prefix = String(decoding: data.prefix(1024), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let isHTML = response.mimeType?.lowercased() == "text/html" || prefix.hasPrefix("<!doctype html") || prefix.hasPrefix("<html")
-        if config.isDDNSTO && ((300...399).contains(response.statusCode) || response.statusCode == 401 || response.statusCode == 403 || isHTML) {
+        let ddnsto = request.url?.host?.hasSuffix(".ddnsto.com") == true
+        if ddnsto && ((300...399).contains(response.statusCode) || response.statusCode == 401 || response.statusCode == 403 || isHTML) {
             throw ComfyAPIError(statusCode: response.statusCode, message: "DDNSTO 连接需要检查网页验证。请点“去验证”，完成后关闭网页，App 会重新检查连接。", requiresBrowserVerification: true)
         }
         guard (200...299).contains(response.statusCode) else {

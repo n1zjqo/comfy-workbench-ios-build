@@ -5,6 +5,25 @@ import Combine
 @testable import ComfyWorkbench
 
 final class NativeExperienceTests: XCTestCase {
+    @MainActor func testStrataPlacesAndConversationRenderWithoutArtworkLeak() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = WorkbenchStore(storageURL: folder)
+        let clipboard = ClipboardSyncStore(storageURL: folder.appendingPathComponent("clipboard.json"))
+        let strata = StrataStore(storage: folder.appendingPathComponent("strata.json"))
+        store.background = testImage()
+        store.activeTab = 3
+        let places = try host(WorkbenchView().environmentObject(store).environmentObject(clipboard).environmentObject(strata).preferredColorScheme(.dark))
+        XCTAssertTrue(descendants(places).compactMap { $0 as? UIImageView }.allSatisfy { $0.image !== store.background })
+        try capturePreview(places, name: "strata-places")
+        places.isHidden = true
+        store.activeTab = 0; strata.assistantSelected = true
+        let chat = try host(WorkbenchView().environmentObject(store).environmentObject(clipboard).environmentObject(strata).preferredColorScheme(.dark))
+        XCTAssertTrue(descendants(chat).compactMap { $0 as? UIImageView }.allSatisfy { $0.image !== store.background })
+        try capturePreview(chat, name: "strata-chat")
+        chat.isHidden = true
+    }
+
     @MainActor func testClipboardRefreshKeepsFollowingContentAtTheSamePosition() throws {
         let state = RefreshLayoutState()
         var cardFrame = CGRect.zero
@@ -71,10 +90,12 @@ final class NativeExperienceTests: XCTestCase {
         store.canvasRunIssue = nil
         for tab in [1, 2, 4, 3] {
             store.activeTab = tab
-            let window = try host(WorkbenchView().environmentObject(store).environmentObject(sync).preferredColorScheme(.dark))
+            let window = try host(WorkbenchView().environmentObject(store).environmentObject(sync).environmentObject(StrataStore(storage: folder.appendingPathComponent("strata.json"))).preferredColorScheme(.dark))
             XCTAssertTrue(descendants(window).compactMap { $0 as? UIImageView }.allSatisfy { $0.image !== store.background }, "Chat photo leaked into tab \(tab)")
             if tab == 1 { try capturePreview(window, name: "application") }
             if tab == 4 { try capturePreview(window, name: "clipboard") }
+            if tab == 3 { try capturePreview(window, name: "places") }
+            if tab == 3 { try capturePreview(window, name: "places") }
             window.isHidden = true
         }
     }

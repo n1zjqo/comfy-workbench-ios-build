@@ -1,0 +1,13 @@
+{
+  "server_id": "REPLACE-WITH-A-NEW-UUID",
+  "name": "办公室 5090",
+  "listen": "127.0.0.1",
+  "port": 8086,
+  "upstream": "http://127.0.0.1:18086",
+  "api_key_file": "/path/to/existing-strata-api-key.txt",
+  "comfy_url": "http://127.0.0.1:8188",
+  "model": "REPLACE-WITH-EXISTING-MODEL-ID",
+  "min_free_mib": 31000,
+  "state_file": "/path/to/private/bridge-state.json",
+  "task_workspace": "/path/to/dedicated-task-workspace"
+}

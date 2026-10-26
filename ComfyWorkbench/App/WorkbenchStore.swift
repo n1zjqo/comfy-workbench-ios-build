@@ -307,7 +307,10 @@ private struct SavedState: Codable {
     func connect(config: ServerConfig, password: String) async {
         busy = true; defer { busy = false }
         do {
+            var config = config
             _ = try config.validatedBaseURL()
+            let probe = ComfyClient(config: config, password: password)
+            if let id = try await probe.pairRoutes() { config.serviceID = id }
             let client = ComfyClient(config: config, password: password)
             _ = try await client.systemStats()
             let metadata = try await client.objectInfo()
@@ -337,7 +340,9 @@ private struct SavedState: Codable {
     func beginVerification(config: ServerConfig, password: String? = nil) {
         guard !busy, verificationPage == nil else { return }
         do {
-            let url = try config.validatedBaseURL()
+            var verification = config
+            if let internet = config.publicURL, !internet.isEmpty { verification.baseURL = internet }
+            let url = try verification.validatedBaseURL()
             guard url.scheme?.lowercased() == "https" else { throw WorkflowError.invalid("网页验证请填写完整的 HTTPS 外网地址。局域网 HTTP 地址无需 DDNSTO 验证。") }
             let saved = failedConnection?.config == config ? failedConnection?.password : nil
             let storedPassword = try KeychainStore.password(for: config.passwordKey)
