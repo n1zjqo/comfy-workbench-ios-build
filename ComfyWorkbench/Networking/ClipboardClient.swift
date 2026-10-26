@@ -87,6 +87,7 @@ public enum ClipboardEndpoint {
 private final class ClipboardRedirectGuard: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
 }
+private struct ClipboardErrorBody: Decodable { let error: String }
 
 public actor ClipboardClient {
     private let session: URLSession
@@ -142,8 +143,7 @@ public actor ClipboardClient {
         guard !(300..<400).contains(http.statusCode) else { throw ClipboardFailure("地址跳转或需要网页验证，请检查地址后重试") }
         guard http.mimeType == "application/json" else { throw ClipboardFailure("返回了网页，请检查地址或完成外网验证") }
         guard (200..<300).contains(http.statusCode) else {
-            struct ErrorBody: Decodable { let error: String }
-            let reason = (try? JSONDecoder().decode(ErrorBody.self, from: data).error) ?? "同步请求失败"
+            let reason = (try? JSONDecoder().decode(ClipboardErrorBody.self, from: data).error) ?? "同步请求失败"
             throw ClipboardFailure(reason, status: http.statusCode)
         }
         return try JSONDecoder().decode(T.self, from: data)
@@ -177,3 +177,4 @@ public struct ClipboardArchive: Codable {
         if !batch.hasMore { initialized = true }
     }
 }
+
