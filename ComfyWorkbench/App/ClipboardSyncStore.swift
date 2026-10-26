@@ -11,6 +11,7 @@ final class ClipboardSyncStore: ObservableObject {
     private let client: ClipboardClient
     private let storage: URL
     private var loop: Task<Void, Never>?
+    private var pasteboardObserver: NSObjectProtocol?
     private var changeCount: Int
     private var localChangedAt = Date.distantPast
     private var nextNetwork = Date.distantPast
@@ -21,8 +22,11 @@ final class ClipboardSyncStore: ObservableObject {
         changeCount = UIPasteboard.general.changeCount
         do { if FileManager.default.fileExists(atPath: storage.path) { archive = try JSONDecoder().decode(ClipboardArchive.self, from: Data(contentsOf: storage)); status = "等待同步" } }
         catch { notice = "同步草稿暂时无法读取：\(error.localizedDescription)" }
+        pasteboardObserver = NotificationCenter.default.addObserver(forName: UIPasteboard.changedNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.checkClipboard() }
+        }
     }
-    deinit { loop?.cancel() }
+    deinit { loop?.cancel(); if let pasteboardObserver = pasteboardObserver { NotificationCenter.default.removeObserver(pasteboardObserver) } }
     func resume() {
         guard loop == nil else { return }; nextNetwork = .distantPast
         loop = Task { [weak self] in
@@ -105,13 +109,17 @@ final class ClipboardSyncStore: ObservableObject {
         do { let key = archive.profile?.tokenKey; try commit(ClipboardArchive()); if let key = key { try? KeychainStore.deletePassword(for: key) }; route = "未连接"; status = "先和电脑配对" }
         catch { notice = error.localizedDescription }
     }
-    private func tick() async {
+    private func checkClipboard() {
         guard UIApplication.shared.applicationState == .active else { return }
         let count = UIPasteboard.general.changeCount
         if count != changeCount {
             changeCount = count; localChangedAt = Date()
             if archive.autoSend && archive.profile != nil { do { try capture(force: false) } catch { notice = error.localizedDescription } }
         }
+    }
+    private func tick() async {
+        guard UIApplication.shared.applicationState == .active else { return }
+        checkClipboard()
         guard !busy, Date() >= nextNetwork, let profile = archive.profile else { return }
         busy = true; defer { busy = false }
         let started = Date(), hadPending = !archive.outbox.isEmpty

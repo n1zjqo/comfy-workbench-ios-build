@@ -1,4 +1,5 @@
 import SwiftUI
+import ImageIO
 
 struct ClipboardPage: View {
     @EnvironmentObject var sync: ClipboardSyncStore
@@ -48,16 +49,16 @@ struct ClipboardPage: View {
                     ForEach(sync.archive.history) { entry in
                         VStack(alignment: .leading, spacing: 15) {
                             HStack { Text(entry.deviceName).lineLimit(1); Spacer(); Text(entry.date, style: .time) }.font(.caption).foregroundColor(.white.opacity(0.65))
-                            if entry.kind == "image", let data = Data(base64Encoded: entry.data ?? ""), let image = UIImage(data: data) {
-                                Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 260).clipShape(RoundedRectangle(cornerRadius: 12))
+                            if entry.kind == "image" {
+                                ClipboardThumbnail(entry: entry)
                             } else { Text(entry.text ?? "").font(.body).lineLimit(8).textSelection(.enabled) }
                             HStack {
                                 Button { sync.copy(entry) } label: { Label("复制", systemImage: "doc.on.doc").frame(minHeight: 44) }
                                 Spacer()
                                 if let text = entry.text, store.selected != nil {
                                     Button("用作提示词") { store.setChatDraft(text); store.activeTab = 0 }.frame(minHeight: 44)
-                                } else if entry.kind == "image", let data = Data(base64Encoded: entry.data ?? ""), let image = UIImage(data: data) {
-                                    Button("设为底图") { store.setBackground(image); store.activeTab = 0 }.frame(minHeight: 44)
+                                } else if entry.kind == "image" {
+                                    Button("设为底图") { if let image = ClipboardThumbnail.image(entry, maximum: 2400) { store.setBackground(image); store.activeTab = 0 } }.frame(minHeight: 44)
                                 }
                             }.font(.caption.weight(.medium))
                         }.padding(20).glass()
@@ -67,6 +68,22 @@ struct ClipboardPage: View {
         }
         .sheet(isPresented: $settings) { ClipboardSettings().environmentObject(sync) }
         .alert("同步", isPresented: Binding(get: { sync.notice != nil }, set: { if !$0 { sync.notice = nil } })) { Button("知道了") { sync.notice = nil } } message: { Text(sync.notice ?? "") }
+    }
+}
+
+private struct ClipboardThumbnail: View {
+    let entry: ClipboardEntry
+    @State private var thumbnail: UIImage?
+    var body: some View {
+        Group {
+            if let thumbnail = thumbnail { Image(uiImage: thumbnail).resizable().scaledToFit().frame(maxHeight: 260).clipShape(RoundedRectangle(cornerRadius: 12)) }
+            else { Image(systemName: "photo").frame(height: 100).frame(maxWidth: .infinity).foregroundColor(.secondary) }
+        }.onAppear { thumbnail = Self.image(entry, maximum: 640) }.onDisappear { thumbnail = nil }
+    }
+    static func image(_ entry: ClipboardEntry, maximum: Int) -> UIImage? {
+        guard let data = Data(base64Encoded: entry.data ?? ""), let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: maximum, kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else { return nil }
+        return UIImage(cgImage: image)
     }
 }
 
@@ -105,7 +122,7 @@ struct ClipboardSettings: View {
                 .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("完成") { dismiss() } } }
         }.onAppear { if let profile = sync.archive.profile { lan = profile.lanURL; internet = profile.publicURL; name = profile.deviceName } }
         .sheet(item: $browser, onDismiss: { sync.retry() }) { page in VerificationBrowser(url: page.url) { browser = nil }.ignoresSafeArea() }
-        .alert("断开配对？", isPresented: $disconnect) { Button("取消", role: .cancel) {}; Button("断开并清除", role: .destructive) { sync.disconnect() } } message: { Text("将清除本机同步历史和待发送内容。电脑中心上的记录不受影响。") }
+        .confirmationDialog("断开配对？", isPresented: $disconnect, titleVisibility: .visible) { Button("断开并清除", role: .destructive) { sync.disconnect() }; Button("取消", role: .cancel) {} } message: { Text("将清除本机同步历史和待发送内容。电脑中心上的记录不受影响。") }
         .alert("同步", isPresented: Binding(get: { sync.notice != nil }, set: { if !$0 { sync.notice = nil } })) { Button("知道了") { sync.notice = nil } } message: { Text(sync.notice ?? "") }
     }
 }

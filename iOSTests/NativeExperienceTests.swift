@@ -17,8 +17,9 @@ final class NativeExperienceTests: XCTestCase {
         XCTAssertEqual(restored.archive.lastDigest, entry.input.digest)
         XCTAssertTrue(restored.archive.outbox.isEmpty)
         XCTAssertEqual(sync.notice, "已复制")
-        let protection = try FileManager.default.attributesOfItem(atPath: storage.path)[.protectionKey] as? FileProtectionType
-        XCTAssertEqual(protection, .complete)
+        // Foundation returns this attribute as NSString, not the Swift RawRepresentable wrapper.
+        let protection = try FileManager.default.attributesOfItem(atPath: storage.path)[.protectionKey] as? String
+        XCTAssertEqual(protection, FileProtectionType.complete.rawValue)
     }
 
     @MainActor func testClipboardPageRendersOnXSViewport() throws {
@@ -168,3 +169,4 @@ final class NativeExperienceTests: XCTestCase {
         return { x, y in let index = (y * width + x) * 4; return (bytes[index], bytes[index + 1], bytes[index + 2], bytes[index + 3]) }
     }
 }
+
