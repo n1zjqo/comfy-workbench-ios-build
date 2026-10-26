@@ -2,7 +2,7 @@
 
 面向 iPhone / iOS 15.0+ 的非官方原生 SwiftUI 客户端，参考 [Mimikkoro1/comfy-workbench-android](https://github.com/Mimikkoro1/comfy-workbench-android) 的直连 ComfyUI 与工作流参数映射思路，提供对话式生成、AI 应用式参数面板及右滑清屏。界面设计参考 [Anthropic frontend-design](https://github.com/anthropics/skills/blob/main/skills/frontend-design/SKILL.md)。
 
-当前源码 **0.5.1（build 6）**，最低 iOS 15.0；具体构建、测试与真机限制见 VALIDATION.md。
+版本 **0.5.1（build 6）** 已通过 [GitHub Actions 构建](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/40320548538)，最低 iOS 15.0。81 项核心/网络测试与 9 项原生测试通过，1 项硬件文件保护检查在模拟器跳过；已检查原生页面截图。下载后的 IPA 已独立核对版本、arm64、SHA-256 和归档完整性，详细结果与真机待测项目见 VALIDATION.md。
 
 ## 0.5.1 页面整理与外网配对
 
