@@ -163,6 +163,7 @@ struct StrataChatPage: View {
     @State private var photoPicker = false
     @State private var imagePreview = false
     @State private var review: StrataTask?
+    @FocusState private var composerFocused: Bool
     var body: some View {
         VStack(spacing: 12) {
             HStack {
@@ -188,7 +189,11 @@ struct StrataChatPage: View {
                         }
                         ForEach(strata.messages) { message in
                             VStack(alignment: .leading, spacing: 10) {
-                                Text(message.role == "user" ? "你" : "Strata").font(.caption.weight(.semibold)).foregroundColor(.secondary)
+                                HStack {
+                                    Text(message.role == "user" ? "你" : "Strata").font(.caption.weight(.semibold)).foregroundColor(.secondary)
+                                    Spacer()
+                                    if !message.content.isEmpty { StrataCopyButton(text: message.content) }
+                                }
                                 if let data = message.image, let picture = UIImage(data: data) { Image(uiImage: picture).resizable().scaledToFit().frame(maxHeight: 180).clipShape(RoundedRectangle(cornerRadius: 12)) }
                                 Text(message.content.isEmpty ? "正在思考…" : message.content).font(.body).textSelection(.enabled)
                             }.padding(16).frame(maxWidth: .infinity, alignment: .leading).glass(18)
@@ -200,7 +205,10 @@ struct StrataChatPage: View {
                                 HStack { Text(task.title).font(.headline).lineLimit(2); Spacer(); Text(task.stateLabel).font(.caption) }
                                 Text("执行位置：办公室 5090").font(.caption).foregroundColor(.secondary)
                                 ForEach(Array(task.events.enumerated()), id: \.offset) { _, event in Text(event).font(.caption).foregroundColor(.secondary) }
-                                if !task.output.isEmpty { Text(task.output).font(.subheadline).textSelection(.enabled) }
+                                if !task.output.isEmpty {
+                                    Text(task.output).font(.subheadline).textSelection(.enabled)
+                                    StrataCopyButton(text: task.output)
+                                }
                                 HStack {
                                     if task.pending != nil { Button("查看并确认写入") { review = task }.buttonStyle(.borderedProminent) }
                                     if !task.finished { Button("取消任务", role: .destructive) { Task { await strata.taskAction(task, action: "cancel") } }.buttonStyle(.bordered) }
@@ -216,17 +224,22 @@ struct StrataChatPage: View {
                 }
                 HStack(spacing: 10) {
                     if mode == 0 { Button { photoPicker = true } label: { Image(systemName: "photo").frame(width: 36, height: 44) }.accessibilityLabel("添加图片") }
-                    TextField(mode == 0 ? "给 Strata 发消息…" : "描述文件任务…", text: $strata.draft).padding(.vertical, 12)
+                    TextField(mode == 0 ? "给 Strata 发消息…" : "描述文件任务…", text: $strata.draft)
+                        .focused($composerFocused).submitLabel(.send).onSubmit { submitDraft() }
+                        .disabled(strata.busy).padding(.vertical, 12)
                     if strata.chatting {
                         Button { strata.stopChat() } label: { Image(systemName: "stop.fill").frame(width: 44, height: 44) }.accessibilityLabel("停止接收")
                     } else {
-                        Button {
-                            if mode == 0 { strata.send(image: image); if strata.chatting { image = nil } }
-                            else { Task { await strata.startTask() } }
-                        } label: { Image(systemName: "arrow.up").font(.headline).frame(width: 44, height: 44).foregroundColor(Palette.ink).background(Palette.paper, in: Circle()) }.disabled(strata.busy || strata.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel(mode == 0 ? "发送消息" : "开始任务")
+                        Button { submitDraft() } label: { Image(systemName: "arrow.up").font(.headline).frame(width: 44, height: 44).foregroundColor(Palette.ink).background(Palette.paper, in: Circle()) }.disabled(strata.busy || strata.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel(mode == 0 ? "发送消息" : "开始任务")
                     }
                 }.padding(.horizontal, 10).padding(.vertical, 5).glass(26)
             }.padding(.horizontal, 22).padding(.bottom, 12)
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("收起键盘") { composerFocused = false }
+            }
         }
         .sheet(isPresented: $photoPicker) { PhotoPicker { image = $0 } }
         .sheet(isPresented: $imagePreview) {
@@ -246,13 +259,27 @@ struct StrataChatPage: View {
                         Text("办公室 5090").font(.headline)
                         Text("新文件：" + (task.pending?.arguments["path"] ?? "")).font(.subheadline)
                         Text(task.pending?.arguments["content"] ?? "").font(.body).textSelection(.enabled)
+                        StrataCopyButton(text: task.pending?.arguments["content"] ?? "")
                         Button("确认创建此文件") { Task { await strata.taskAction(task, action: "approve"); review = nil } }.buttonStyle(.borderedProminent).disabled(strata.busy)
                     }.padding(24)
                 }.navigationTitle("确认文件内容").navigationBarTitleDisplayMode(.inline).toolbar { ToolbarItem(placement: .cancellationAction) { Button("返回") { review = nil } } }
             }.navigationViewStyle(.stack)
         }
-        .onDisappear { strata.save() }
+        .onDisappear { composerFocused = false; strata.save() }
         .onChange(of: strata.draft) { _ in strata.scheduleDraftSave() }
+    }
+
+    @MainActor private func submitDraft() {
+        guard !strata.busy, !strata.chatting, !strata.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if mode == 0 {
+            strata.send(image: image)
+            if strata.chatting { image = nil; composerFocused = false }
+        } else {
+            Task {
+                await strata.startTask()
+                if strata.draft.isEmpty { composerFocused = false }
+            }
+        }
     }
 
     private var taskGuide: some View {
@@ -267,6 +294,23 @@ struct StrataChatPage: View {
             }.buttonStyle(.plain)
             Text("创建文件前，你会看到文件名和完整内容，确认后才会写入。当前不支持操作桌面软件、任意运行命令或直接读取手机文件。").font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
         }.padding(.vertical, 24)
+    }
+}
+
+struct StrataCopyButton: View {
+    let text: String
+    @State private var copied = false
+    var body: some View {
+        Button {
+            UIPasteboard.general.string = text
+            copied = true
+        } label: {
+            Label(copied ? "已复制" : "复制", systemImage: copied ? "checkmark" : "doc.on.doc")
+                .font(.caption).frame(minWidth: 60, minHeight: 44).contentShape(Rectangle())
+        }.buttonStyle(.plain).foregroundColor(.secondary)
+            .disabled(text.isEmpty)
+            .accessibilityLabel(copied ? "已复制文本" : "复制文本")
+            .onChange(of: text) { _ in copied = false }
     }
 }
 

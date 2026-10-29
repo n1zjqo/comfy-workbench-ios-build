@@ -1,12 +1,15 @@
 # Comfy Workbench for iOS
 
-## 0.6.1 图片附件与任务引导（源码已准备，待 macOS 构建）
+## 0.6.1 图片附件与对话操作（build 10，待 macOS 构建验收）
 
 - Strata 输入框上方显示待发送图片缩略图，完整保留图片比例；轻点可放大查看，独立移除按钮支持取消选择。
+- Strata 的用户消息、助手回答、任务结果和待确认文件内容提供明确的复制按钮；点击后显示“已复制”。只在用户点击时写入手机剪贴板。
+- 消息进入发送流程后自动收起键盘；任务创建成功后收起键盘。输入框支持键盘发送键，未通过检查的聊天输入保留；任务请求失败时保留草稿。
 - 任务页新增能力说明和可点击示例。示例只填入草稿，需点击发送；新建文件仍需预览并确认。
 - “开启”改为“加载模型”，“暂停”改为“暂停接收”。明确暂停会拒绝新请求、等待当前生成完成后卸载；保留控制服务供远程恢复。
 - 本次未加入立即终止服务端推理的功能。聊天停止按钮只停止客户端接收；取消任务停止后续步骤。
 - 保持 iOS 15、现有配对与服务端协议兼容。这些界面变化需安装 0.6.1 IPA 后生效；下文 0.6.0 构建记录属于上一版本。
+- build 9 不包含随后补充的复制按钮与键盘修复，不作为本轮最终交付。完整修复以 build 10 为准，实际编译与测试结果以对应的 GitHub Actions 记录为准。
 
 面向 iPhone / iOS 15.0+ 的非官方原生 SwiftUI 客户端，参考 [Mimikkoro1/comfy-workbench-android](https://github.com/Mimikkoro1/comfy-workbench-android) 的直连 ComfyUI 与工作流参数映射思路，提供对话式生成、AI 应用式参数面板及右滑清屏。界面设计参考 [Anthropic frontend-design](https://github.com/anthropics/skills/blob/main/skills/frontend-design/SKILL.md)。
 
