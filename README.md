@@ -1,6 +1,8 @@
 # Comfy Workbench for iOS
 
-## 0.6.1 图片附件与对话操作（build 10，待 macOS 构建验收）
+## 0.6.1 图片附件与对话操作（build 10，macOS 构建已通过）
+
+[GitHub Actions 构建与测试](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/40859785456)已通过：90 项核心/网络测试、12 项原生测试、25 项控制桥测试，1 项设备文件保护属性检查在模拟器跳过。IPA 已核对 build 10、arm64、iOS 15 最低版本、签名及 SHA-256。图片预览、复制和键盘的 XS 实机交互仍待确认。
 
 - Strata 输入框上方显示待发送图片缩略图，完整保留图片比例；轻点可放大查看，独立移除按钮支持取消选择。
 - Strata 的用户消息、助手回答、任务结果和待确认文件内容提供明确的复制按钮；点击后显示“已复制”。只在用户点击时写入手机剪贴板。
