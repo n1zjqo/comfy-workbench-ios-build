@@ -69,12 +69,12 @@ struct PlacesConnectionPage: View {
                             Button("恢复并加载模型") { Task { await strata.control("resume") } }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink)
                         } else {
                             HStack(spacing: 10) {
-                                Button("开启") { Task { await strata.control("load") } }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink)
+                                Button("加载模型") { Task { await strata.control("load") } }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink)
                                 Button("释放显存") { confirmation = "release" }.buttonStyle(.bordered)
-                                Button("暂停") { confirmation = "pause" }.buttonStyle(.bordered)
+                                Button("暂停接收") { confirmation = "pause" }.buttonStyle(.bordered)
                             }.font(.subheadline)
                         }
-                        Text("释放显存：下次对话可自动唤醒。\n暂停：当前生成结束后释放，后续任务步骤等待手动恢复。").font(.caption).foregroundColor(.secondary).lineSpacing(4)
+                        Text("释放显存：空闲时卸载，下次对话自动加载。\n暂停接收：拒绝新请求，当前生成完成后卸载，手动恢复后继续。\n两项操作都会保留控制服务，方便你远程重新开启。").font(.caption).foregroundColor(.secondary).lineSpacing(4)
                         HStack {
                             if strata.busy { ProgressView().scaleEffect(0.8); Text("操作进行中").font(.caption) }
                             Spacer()
@@ -109,7 +109,7 @@ struct PlacesConnectionPage: View {
     }
     private var confirmationTitle: String {
         switch confirmation {
-        case "pause": return "暂停办公室 Strata？当前生成继续完成，新请求和后续任务步骤等待手动恢复。"
+        case "pause": return "暂停接收新请求？当前生成会继续完成，之后卸载模型。后续任务步骤等待手动恢复；这不会立即中断正在生成的内容。"
         case "release": return "空闲时卸载 Strata 模型？后续聊天可以自动唤醒。"
         case "free_comfy": return "释放办公室 ComfyUI 的驻留模型？仅在运行和等待队列均为空时执行。"
         default: return "空闲时卸载并重新加载办公室 Strata 模型？"
@@ -161,6 +161,7 @@ struct StrataChatPage: View {
     @State private var mode = 0
     @State private var image: UIImage?
     @State private var photoPicker = false
+    @State private var imagePreview = false
     @State private var review: StrataTask?
     var body: some View {
         VStack(spacing: 12) {
@@ -193,7 +194,7 @@ struct StrataChatPage: View {
                             }.padding(16).frame(maxWidth: .infinity, alignment: .leading).glass(18)
                         }
                     } else {
-                        if strata.tasks.isEmpty { Text("描述要完成的文件任务。执行位置：办公室 5090 的专用任务目录。").font(.subheadline).foregroundColor(.secondary).padding(.vertical, 30) }
+                        if strata.tasks.isEmpty { taskGuide }
                         ForEach(strata.tasks) { task in
                             VStack(alignment: .leading, spacing: 12) {
                                 HStack { Text(task.title).font(.headline).lineLimit(2); Spacer(); Text(task.stateLabel).font(.caption) }
@@ -210,7 +211,9 @@ struct StrataChatPage: View {
                 }.padding(.horizontal, 24).padding(.bottom, 12)
             }
             VStack(alignment: .leading, spacing: 8) {
-                if image != nil && mode == 0 { Button("移除已选图片", role: .destructive) { image = nil }.font(.caption) }
+                if let selectedImage = image, mode == 0 {
+                    StrataAttachmentPreview(image: selectedImage, open: { imagePreview = true }, remove: { image = nil })
+                }
                 HStack(spacing: 10) {
                     if mode == 0 { Button { photoPicker = true } label: { Image(systemName: "photo").frame(width: 36, height: 44) }.accessibilityLabel("添加图片") }
                     TextField(mode == 0 ? "给 Strata 发消息…" : "描述文件任务…", text: $strata.draft).padding(.vertical, 12)
@@ -226,6 +229,16 @@ struct StrataChatPage: View {
             }.padding(.horizontal, 22).padding(.bottom, 12)
         }
         .sheet(isPresented: $photoPicker) { PhotoPicker { image = $0 } }
+        .sheet(isPresented: $imagePreview) {
+            NavigationView {
+                Group {
+                    if let selectedImage = image { FittedArtwork(image: selectedImage, margin: CGSize(width: 24, height: 32)) }
+                    else { Color.black }
+                }
+                .navigationTitle("待发送图片").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { imagePreview = false } } }
+            }.navigationViewStyle(.stack)
+        }
         .sheet(item: $review) { task in
             NavigationView {
                 ScrollView {
@@ -240,5 +253,45 @@ struct StrataChatPage: View {
         }
         .onDisappear { strata.save() }
         .onChange(of: strata.draft) { _ in strata.scheduleDraftSave() }
+    }
+
+    private var taskGuide: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("让 Strata 处理任务文件").font(.title3.weight(.medium))
+            Text("在办公室 5090 的专用目录中列文件、读取文本，或生成新的文本文件。选择一个示例后，再点发送。").font(.subheadline).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            Button { strata.draft = "列出任务目录中的文件。" } label: {
+                Label("列出任务文件", systemImage: "list.bullet").frame(minHeight: 44, alignment: .leading)
+            }.buttonStyle(.plain)
+            Button { strata.draft = "写一份三条事项的工作清单，建议一个未使用的新文件名；先展示文件内容，等我确认后再创建。" } label: {
+                Label("生成一份工作清单", systemImage: "doc.badge.plus").frame(minHeight: 44, alignment: .leading)
+            }.buttonStyle(.plain)
+            Text("创建文件前，你会看到文件名和完整内容，确认后才会写入。当前不支持操作桌面软件、任意运行命令或直接读取手机文件。").font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+        }.padding(.vertical, 24)
+    }
+}
+
+struct StrataAttachmentPreview: View {
+    let image: UIImage
+    let open: () -> Void
+    let remove: () -> Void
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: open) {
+                Image(uiImage: image).resizable().scaledToFit()
+                    .frame(width: 68, height: 68)
+                    .padding(4).background(Palette.workspace)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.18), lineWidth: 0.5))
+            }.buttonStyle(.plain).accessibilityLabel("预览待发送图片")
+            VStack(alignment: .leading, spacing: 5) {
+                Text("已选图片").font(.subheadline.weight(.medium))
+                Text("轻点查看大图").font(.caption).foregroundColor(.secondary)
+            }
+            Spacer(minLength: 0)
+            Button(action: remove) {
+                Image(systemName: "xmark").font(.system(size: 13, weight: .semibold))
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityLabel("移除已选图片")
+        }.padding(.horizontal, 6).padding(.vertical, 4)
     }
 }
