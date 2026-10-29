@@ -71,6 +71,7 @@ struct ChatView: View {
     @State private var message = ""
     @State private var photoPicker = false
     @State private var artworkZoomed = false
+    @State private var expandedInput = false
     @GestureState private var drag: CGFloat = 0
     @FocusState private var focused: Bool
     var body: some View {
@@ -108,6 +109,9 @@ struct ChatView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(alignment: .bottom, spacing: 10) {
                             TextField("描述你想生成的画面…", text: $message).font(.body).focused($focused).padding(.vertical, 13)
+                            Button { focused = false; expandedInput = true } label: {
+                                Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 44, height: 44)
+                            }.accessibilityLabel("展开输入框")
                             Button {
                                 let text = message, workflowID = store.selectedID; focused = false
                                 Task { await store.submit(message: text); if store.error == nil && message == text && store.selectedID == workflowID { message = "" } }
@@ -137,6 +141,7 @@ struct ChatView: View {
                     else if clean && value.translation.width < -65 { toggleClean(false) }
                 })
         }.sheet(isPresented: $photoPicker) { PhotoPicker { store.setBackground($0) } }
+        .sheet(isPresented: $expandedInput) { ExpandedComposer(title: "编辑提示词", text: $message) }
         .onAppear { message = store.selected?.chatDraft ?? "" }
         .onChange(of: store.selectedID) { _ in message = store.selected?.chatDraft ?? "" }
         .onChange(of: message) { store.setChatDraft($0) }
@@ -211,7 +216,7 @@ struct ConnectionPage: View {
                 }.padding(20).glass()
                 Divider()
                 Text("Comfy Workbench for iOS").font(.headline)
-                Text("0.6.0 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
+                Text("0.6.2 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
             }.padding(24)
         }.onAppear {
             if let config = store.server { address = config.baseURL; internet = config.publicURL ?? ""; username = config.username; key = config.passwordKey; password = (try? KeychainStore.password(for: key)) ?? "" }

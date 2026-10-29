@@ -8,6 +8,8 @@
   "comfy_url": "http://127.0.0.1:8188",
   "model": "REPLACE-WITH-EXISTING-MODEL-ID",
   "min_free_mib": 31000,
+  "comfy_priority_enabled": false,
+  "comfy_idle_seconds": 10,
   "state_file": "/path/to/private/bridge-state.json",
   "task_workspace": "/path/to/dedicated-task-workspace"
 }

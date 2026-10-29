@@ -19,6 +19,19 @@ final class StrataTests: XCTestCase {
         value.paused = true; value.loaded = true
         XCTAssertTrue(value.title.contains("等待释放"))
     }
+    func testGPUCoordinationStatusKeepsOldBridgeCompatibilityAndManualPausePriority() throws {
+        var value = try JSONDecoder().decode(StrataStatus.self, from: Data(state.utf8))
+        XCTAssertNil(value.gpuPolicy)
+        value.paused = false
+        value.gpuPolicy = "comfy_priority"; value.gpuPhase = "comfy"
+        XCTAssertTrue(value.title.contains("ComfyUI"))
+        value.gpuPhase = "restoring"
+        XCTAssertTrue(value.title.contains("恢复"))
+        value.paused = true
+        XCTAssertTrue(value.title.contains("手动恢复"))
+        let data = try JSONEncoder().encode(value)
+        XCTAssertEqual(try JSONDecoder().decode(StrataStatus.self, from: data), value)
+    }
     func testOfficeLANIsPreferredWithoutPublicProbe() async throws {
         let log = StrataLog()
         StrataProtocol.handler = { [self] request in log.add(request); return (200, "application/json", request.url!.path.hasSuffix("info") ? info() : state) }

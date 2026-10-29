@@ -18,7 +18,9 @@ jobs:
       - name: Validate source package
         run: python3 scripts/verify-source.py
       - name: Test Strata admission and task permissions
-        run: python3 -B OfficeBridge/test_bridge.py -v
+        run: |
+          python3 -B OfficeBridge/test_bridge.py -v
+          python3 -B OfficeBridge/test_gpu_coordinator.py -v
       - name: Test workflow and network logic
         run: swift test
       - name: Build and verify arm64 IPA

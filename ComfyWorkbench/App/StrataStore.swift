@@ -95,6 +95,10 @@ private struct StrataArchive: Codable {
         guard !chatting, !text.isEmpty else { return }
         guard !profile.serverID.isEmpty else { notice = "请先在连接页设置办公室 Strata"; return }
         guard status?.paused != true else { notice = "Strata 已暂停，请先手动恢复"; return }
+        if status?.gpuPolicy == "comfy_priority", ["waiting_strata", "yielding", "comfy", "settling", "restoring"].contains(status?.gpuPhase ?? "") {
+            notice = "ComfyUI 正在优先生产或切换显存，输入已保留；Strata 就绪后再发送。"
+            return
+        }
         guard messages.count < 60 else { notice = "当前对话已满，请开始新对话"; return }
         let picture = image.flatMap { resizedChatImage($0) }
         messages.append(StrataMessage(role: "user", content: text, image: picture)); draft = ""

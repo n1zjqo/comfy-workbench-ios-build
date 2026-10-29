@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import threading
+from gpu_coordinator import GPUCoordinator
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -72,12 +73,22 @@ class Upstream:
     def json(self, path, body=None, comfy=False):
         with self.open(path, body, comfy) as response:
             data = response.read(LIMIT + 1)
+            status = response.status
         if len(data) > LIMIT:
             raise Failure('响应超过大小限制', 502)
+        # ComfyUI /free acknowledges with HTTP 200 and an empty body. Only this
+        # known operation may omit JSON; status/identity responses stay strict.
+        if comfy and path == '/free' and body is not None and status in (200, 204) and not data:
+            return {}
         return json.loads(data)
 
 
-class Gateway:
+class WaitingForComfy(Failure):
+    pass
+
+
+class Gateway(GPUCoordinator):
+    failure = Failure
     def __init__(self, config, upstream):
         self.config, self.upstream = config, upstream
         self.lock = threading.RLock()
@@ -96,6 +107,7 @@ class Gateway:
                 # Corruption must never turn a paused server back on.
                 self.paused = True
         self.tasks = {}
+        self.init_gpu_coordinator()
 
     def info(self):
         return {'protocolVersion': 1, 'service': 'strata-workbench', 'serverId': self.config['server_id'], 'name': self.config.get('name', '办公室 5090')}
@@ -105,7 +117,7 @@ class Gateway:
 
     def status(self):
         with self.lock:
-            value = dict(self.info(), paused=self.paused, activeRequests=self.active, maintenance=self.maintenance)
+            value = dict(self.info(), paused=self.paused, activeRequests=self.active, maintenance=self.maintenance, **self.gpu_status())
         try:
             health = self.health()
             status = self.upstream.json('/v1/status')
@@ -129,14 +141,19 @@ class Gateway:
             raise Failure('模型正在处理任务，请等待完成')
 
     def prepare_load(self):
-        if self.health().get('loaded'):
-            return
+        if self.gpu_enabled:
+            self.require_comfy_gate()
+            if self.comfy_requested:
+                raise WaitingForComfy('ComfyUI 正在使用显存，请等待生产完成')
         if self.config.get('comfy_url'):
             queue = self.upstream.json('/queue', comfy=True)
             if not isinstance(queue.get('queue_running'), list) or not isinstance(queue.get('queue_pending'), list):
                 raise Failure('无法确认 ComfyUI 队列，未加载模型')
             if queue['queue_running'] or queue['queue_pending']:
-                raise Failure('ComfyUI 正在运行或排队，请等待后再开启 Strata')
+                error_type = WaitingForComfy if self.gpu_enabled else Failure
+                raise error_type('ComfyUI 正在运行或排队，请等待后再开启 Strata')
+        if self.health().get('loaded'):
+            return
         gpu = self.upstream.json('/v1/status').get('machine', {}).get('gpu', {})
         try:
             free = float(gpu['total_mib']) - float(gpu['used_mib'])
@@ -145,11 +162,26 @@ class Gateway:
         if free < self.config.get('min_free_mib', 31000):
             raise Failure('空闲显存不足，请先在 ComfyUI 释放驻留模型')
 
+    def settle_after_unload(self):
+        # Engine exit and the sampled VRAM telemetry are not synchronous. Keep
+        # maintenance active briefly so an immediate auto-wake sees fresh data.
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                gpu = self.upstream.json('/v1/status')['machine']['gpu']
+                if float(gpu['total_mib']) - float(gpu['used_mib']) >= self.config.get('min_free_mib', 31000):
+                    return
+            except (Failure, OSError, ValueError, TypeError, KeyError):
+                return  # A later load still requires valid, sufficient telemetry.
+            time.sleep(0.25)
+
     @contextlib.contextmanager
     def admission(self):
         with self.lock:
             if self.paused:
                 raise Failure('Strata 已暂停，请在连接页手动恢复', 423)
+            if self.gpu_enabled and (self.comfy_requested or self.gpu_phase == 'restoring'):
+                raise WaitingForComfy('ComfyUI 优先生产，等待显存切换完成')
             if self.maintenance:
                 raise Failure('正在切换模型，请稍后重试')
             # Serialize generations: avoids simultaneous lazy loads and provides predictable GPU use.
@@ -172,7 +204,7 @@ class Gateway:
                 if not self.paused:
                     self.persist_pause(True)
                 self.pause_revision += 1
-            elif self.paused and action != 'resume':
+            elif self.paused and action not in ('resume', 'free_comfy'):
                 raise Failure('Strata 已暂停，请先手动恢复', 423)
             if self.maintenance:
                 if action == 'pause':
@@ -192,6 +224,8 @@ class Gateway:
             elif action in ('release', 'pause', 'reload'):
                 if self.health().get('loaded'):
                     self.upstream.json('/unload?wait=0', {})
+                    if not self.health().get('loaded'):
+                        self.settle_after_unload()
                 if self.health().get('loaded'):
                     raise Failure('尚未确认模型资源已释放')
             if action in ('load', 'resume', 'reload'):
@@ -212,7 +246,7 @@ class Gateway:
                 self.maintenance = False
                 if action == 'resume' and not self.paused:
                     for task in self.tasks.values():
-                        if task['state'] == 'paused':
+                        if task['state'] in ('paused', 'waiting_comfy'):
                             task['state'] = 'running'
                             threading.Thread(target=self.run_task, args=(task,), daemon=True).start()
 
@@ -224,6 +258,7 @@ class Gateway:
                 self.control('pause')
             except Exception:
                 pass  # Remain paused; retry release without reopening admission.
+        self.coordinate_once()
 
     def file_path(self, name, write=False):
         root = Path(self.config['task_workspace']).resolve()
@@ -268,7 +303,7 @@ class Gateway:
         with self.lock:
             if self.paused:
                 raise Failure('Strata 已暂停', 423)
-            if any(t['state'] in ('running', 'approval', 'paused') for t in self.tasks.values()):
+            if any(t['state'] in ('running', 'approval', 'paused', 'waiting_comfy') for t in self.tasks.values()):
                 raise Failure('请先完成或取消当前任务')
             if len(self.tasks) >= 30:
                 self.tasks.pop(next(iter(self.tasks)))
@@ -296,9 +331,10 @@ class Gateway:
                         task['state'] = 'paused'
                         task['events'].append('等待手动恢复 Strata 后继续后续步骤')
                         return
-                    task['step'] += 1
-                    task['events'].append('正在处理第 %d 步' % task['step'])
                 with self.admission():
+                    with self.lock:
+                        task['step'] += 1
+                        task['events'].append('正在处理第 %d 步' % task['step'])
                     response = self.upstream.json('/v1/chat/completions', {'model': self.config['model'], 'messages': task['_messages'], 'tools': tools, 'parallel_tool_calls': False, 'max_tokens': 4096, 'stream': False})
                 with self.lock:
                     if task['state'] != 'running':
@@ -322,6 +358,11 @@ class Gateway:
                     task['events'].append('已执行 ' + name)
                     task['_messages'].append({'role': 'tool', 'tool_call_id': call['id'], 'content': result})
             raise Failure('任务达到 12 步上限，已停止')
+        except WaitingForComfy:
+            with self.lock:
+                if task['state'] != 'cancelled':
+                    task['state'] = 'waiting_comfy'
+                    task['events'].append('等待 ComfyUI 生产完成后继续')
         except Exception as error:
             with self.lock:
                 if task['state'] != 'cancelled':
@@ -412,6 +453,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise Failure('请求必须是 JSON 对象', 400)
             if not post and path == '/workbench/status':
                 self.reply(gate.status())
+            elif post and path in ('/workbench/comfy/acquire', '/workbench/comfy/idle'):
+                if self.client_address[0] not in ('127.0.0.1', '::1'):
+                    raise Failure('仅供本机 ComfyUI 队列组件调用', 403)
+                self.reply(gate.acquire_comfy() if path.endswith('/acquire') else gate.comfy_idle())
             elif post and path == '/workbench/control':
                 self.reply(gate.control(body.get('action')))
             elif post and path == '/workbench/tasks':

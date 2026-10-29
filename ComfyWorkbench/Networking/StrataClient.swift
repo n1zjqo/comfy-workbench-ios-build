@@ -22,10 +22,23 @@ public struct StrataStatus: Codable, Equatable {
     public var inFlight: Int
     public var model: String
     public var gpu: [String: Double]
+    public var gpuPolicy: String? = nil
+    public var gpuPhase: String? = nil
+    public var gpuError: String? = nil
     public var title: String {
         if paused && !online { return "已暂停 · 推理服务状态待确认" }
         if paused { return loaded ? "已暂停 · 等待释放资源" : "已暂停 · 需手动恢复" }
         if !online { return "推理服务离线" }
+        if gpuPolicy == "comfy_priority" {
+            switch gpuPhase {
+            case "waiting_strata": return "等待当前回答结束，为 ComfyUI 让出显存"
+            case "yielding": return "正在为 ComfyUI 释放显存"
+            case "comfy": return "ComfyUI 优先生产 · Strata 等待恢复"
+            case "settling": return "等待 ComfyUI 队列稳定后恢复"
+            case "restoring": return "ComfyUI 已空闲 · 正在恢复 Strata"
+            default: break
+            }
+        }
         if maintenance { return "正在切换模型" }
         if activeRequests > 0 || inFlight > 0 { return "正在处理任务" }
         return loaded ? "已就绪" : "显存已释放 · 可自动唤醒"
@@ -53,7 +66,7 @@ public struct StrataTask: Codable, Equatable, Identifiable {
     public var pending: StrataPending?
     public var step: Int
     public var finished: Bool { ["completed", "cancelled", "failed"].contains(state) }
-    public var stateLabel: String { ["running": "执行中", "paused": "等待恢复 Strata", "approval": "等待你确认", "completed": "已完成", "cancelled": "已取消", "failed": "未完成"][state] ?? state }
+    public var stateLabel: String { ["running": "执行中", "paused": "等待恢复 Strata", "waiting_comfy": "等待 ComfyUI 生产完成", "approval": "等待你确认", "completed": "已完成", "cancelled": "已取消", "failed": "未完成"][state] ?? state }
 }
 public struct StrataFailure: LocalizedError {
     public let message: String

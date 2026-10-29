@@ -77,7 +77,7 @@ struct WorkflowCanvasView: View {
     }
     private func executionBanner(_ job: GenerationJob) -> some View {
         let trace = job.execution ?? ExecutionTrace()
-        let target = trace.failedNode ?? trace.activeNode
+        let target = store.canvas?.visibleNodeID(for: trace.failedNode ?? trace.activeNode)
         let type = store.canvas?.nodes.first { $0.id == target }?.type ?? "节点"
         return VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 10) {
@@ -300,7 +300,8 @@ final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
             let path = UIBezierPath(); path.move(to: p)
             path.addCurve(to: q, controlPoint1: CGPoint(x: p.x + bend, y: p.y), controlPoint2: CGPoint(x: q.x - bend, y: q.y))
             guard path.bounds.insetBy(dx: -4, dy: -4).intersects(visible) else { continue }
-            let active = selected == link.source || selected == link.target || trace?.activeNode == link.source || trace?.activeNode == link.target
+            let visibleActive = graph.visibleNodeID(for: trace?.activeNode)
+            let active = selected == link.source || selected == link.target || visibleActive == link.source || visibleActive == link.target
             color(link.type).withAlphaComponent(active ? 0.85 : (selected == nil ? 0.28 : 0.08)).setStroke()
             path.lineWidth = (active ? 1.5 : 0.9) / max(0.4, scale); path.stroke()
         }
@@ -318,8 +319,8 @@ final class GraphCanvasUIView: UIView, UIGestureRecognizerDelegate {
         }
     }
     private func drawNode(_ node: CanvasNode, ctx: CGContext) {
-        let running = trace?.phase == .running && trace?.activeNode == node.id
-        let failed = trace?.failedNode == node.id
+        let running = trace?.phase == .running && graph?.visibleNodeID(for: trace?.activeNode) == node.id
+        let failed = graph?.visibleNodeID(for: trace?.failedNode) == node.id
         let completed = trace?.completedNodes.contains(node.id) == true
         let cached = trace?.cachedNodes.contains(node.id) == true
         let r = rect(node), accent = failed ? UIColor.systemRed : (running || completed ? teal : color(node.type)), active = node.id == selected || running || failed

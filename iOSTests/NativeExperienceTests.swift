@@ -5,6 +5,68 @@ import Combine
 @testable import ComfyWorkbench
 
 final class NativeExperienceTests: XCTestCase {
+    @MainActor func testNativeMessageSelectionKeepsSelectedTextDuringStreaming() throws {
+        let window = try host(SelectableMessageText(text: "测试文字 hello world").padding(24).preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        let view = try XCTUnwrap(descendants(window).compactMap { $0 as? SelectionTextView }.first)
+        XCTAssertFalse(view.isEditable); XCTAssertTrue(view.isSelectable); XCTAssertFalse(view.isScrollEnabled)
+        XCTAssertTrue(view.becomeFirstResponder())
+        view.selectedRange = NSRange(location: 0, length: 4)
+        view.pendingText = "测试文字 hello world\n后续的流式回答"
+        view.applyPendingText()
+        XCTAssertEqual(view.text, "测试文字 hello world")
+        XCTAssertEqual(view.selectedRange, NSRange(location: 0, length: 4))
+        view.selectedRange = NSRange(location: 0, length: 0)
+        view.applyPendingText()
+        XCTAssertEqual(view.text, view.pendingText)
+        view.resignFirstResponder()
+    }
+
+    @MainActor func testLongSelectableMessageGrowsToFitAtPhoneWidth() throws {
+        let content = String(repeating: "雨后海岸，柔和的自然光。A quiet coastline after rain.\n", count: 25)
+        let window = try host(ScrollView { SelectableMessageText(text: content).padding(24) }.preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        let view = try XCTUnwrap(descendants(window).compactMap { $0 as? SelectionTextView }.first)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        window.layoutIfNeeded()
+        let needed = view.sizeThatFits(CGSize(width: view.bounds.width, height: .greatestFiniteMagnitude)).height
+        XCTAssertGreaterThan(view.bounds.width, 100)
+        XCTAssertGreaterThan(view.bounds.height, 400)
+        XCTAssertGreaterThanOrEqual(view.bounds.height + 1, needed)
+    }
+
+    @MainActor func testExpandedInputKeepsMultilineDraftAndDoesNotSend() throws {
+        var draft = "第一行\nsecond line"
+        let binding = Binding(get: { draft }, set: { draft = $0 })
+        let window = try host(ExpandedComposer(title: "编辑消息", text: binding).preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        let editor = try XCTUnwrap(descendants(window).compactMap { $0 as? UITextView }.first)
+        XCTAssertTrue(editor.isEditable); XCTAssertTrue(editor.isSelectable)
+        XCTAssertEqual(editor.text, draft)
+        editor.text = "修改后的第一行\n完整保留的第二行"
+        editor.delegate?.textViewDidChange?(editor)
+        XCTAssertEqual(draft, editor.text)
+        try capturePreview(window, name: "expanded-composer")
+    }
+
+    @MainActor func testOpeningStrataToComfyHandoffDoesNotSubmitOrOverwriteDraft() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = WorkbenchStore(storageURL: folder)
+        let workflow = SavedWorkflow(name: "文生图", data: Data(#"{"1":{"class_type":"CLIPTextEncode","inputs":{"text":"original"}}}"#.utf8))
+        store.workflows = [workflow]; store.select(workflow.id); store.setChatDraft("尚未发送的原稿")
+        let strata = StrataStore(storage: folder.appendingPathComponent("strata.json"))
+        let window = try host(ComfyPromptHandoff(initialText: "A quiet coastline after rain.")
+            .environmentObject(store).environmentObject(strata).preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        XCTAssertTrue(store.jobs.isEmpty)
+        XCTAssertEqual(store.selected?.chatDraft, "尚未发送的原稿")
+        XCTAssertEqual(store.currentPromptField?.name, "text")
+        let editor = try XCTUnwrap(descendants(window).compactMap { $0 as? UITextView }.first)
+        XCTAssertEqual(editor.text, "A quiet coastline after rain.")
+        try capturePreview(window, name: "strata-comfy-handoff")
+    }
+
     @MainActor func testStrataPlacesAndConversationRenderWithoutArtworkLeak() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }

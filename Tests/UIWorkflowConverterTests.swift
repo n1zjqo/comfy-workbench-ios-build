@@ -3,6 +3,81 @@ import XCTest
 @testable import ComfyWorkbenchCore
 
 final class UIWorkflowConverterTests: XCTestCase {
+    func testComparerPreviewMetadataIsNotAnExecutionInput() throws {
+        let info = #"{"LoadImage":{"input":{"required":{"image":["STRING"]}}},"Image Comparer (rgthree)":{"output_node":true,"input":{"required":{},"optional":{"image_a":["IMAGE"],"image_b":["IMAGE"]}}}}"#
+        for widgets in [#""widgets_values_named":{"rgthree_comparer":{"images":[{"url":"/view?filename=old.png"}]}}"#,
+                        #""widgets_values":[[{"name":"A","url":"/view?filename=old.png"}]]"#,
+                        #""widgets_values":[{"images":[]}]"#] {
+            let graph = #"{"nodes":[{"id":1,"type":"LoadImage","widgets_values_named":{"image":"synthetic.png"},"outputs":[{"type":"IMAGE"}]},{"id":2,"type":"Image Comparer (rgthree)","inputs":[{"name":"image_a","link":1}],"outputs":[],"# + widgets + #"}],"links":[[1,1,0,2,0,"IMAGE"]]}"#
+            let result = try convert(graph, info)
+            XCTAssertEqual(result["2"]?["class_type"], .string("Image Comparer (rgthree)"))
+            XCTAssertEqual(result["2"]?["inputs"]?["image_a"], .array([.string("1"), .integer(0)]))
+            XCTAssertNil(result["2"]?["inputs"]?["rgthree_comparer"])
+            XCTAssertEqual(result["1"]?["inputs"]?["image"], .string("synthetic.png"))
+        }
+    }
+
+    func testRgthreeButtonMetadataIsScopedAndActualSeedIsPreserved() throws {
+        let result = try convert(#"""
+        {"nodes":[
+          {"id":1,"type":"Seed (rgthree)","widgets_values_named":{"seed":18446744073709551615,"🎲 Randomize Each Time":"","🎲 New Fixed Random":"","USE_LAST_SEED":"okay"},"outputs":[{"type":"INT"}]},
+          {"id":2,"type":"Sink","inputs":[{"name":"seed","link":1}],"outputs":[]},
+          {"id":3,"type":"Fast Groups Bypasser (rgthree)","inputs":[],"outputs":[]},
+          {"id":4,"type":"Label (rgthree)","inputs":[],"outputs":[]}
+        ],"links":[[1,1,0,2,0,"INT"]]}
+        """#, #"{"Seed (rgthree)":{"input":{"required":{"seed":["INT"]}}},"Sink":{"output_node":true,"input":{"required":{"seed":["INT"]}}}}"#)
+        XCTAssertEqual(result["1"]?["inputs"]?["seed"]?.uint64Value, UInt64.max)
+        XCTAssertEqual(result["1"]?["inputs"]?.objectValue?.count, 1)
+        XCTAssertNil(result["3"]); XCTAssertNil(result["4"])
+        XCTAssertThrowsError(try convert(#"{"nodes":[{"id":1,"type":"OtherNode","widgets_values_named":{"rgthree_comparer":{}},"outputs":[]}],"links":[]}"#,
+                                        #"{"OtherNode":{"output_node":true,"input":{}}}"#))
+    }
+
+    private let subgraphInfo = #"{"LoadImage":{"input":{"required":{"image":["STRING"]}}},"ImageScaleBy":{"input":{"required":{"image":["IMAGE"],"upscale_method":["STRING"],"scale_by":["FLOAT"]}}},"SaveImage":{"output_node":true,"input":{"required":{"images":["IMAGE"],"filename_prefix":["STRING"]}}}}"#
+    private let subgraphSource = #"""
+    {"nodes":[
+      {"id":1,"type":"LoadImage","widgets_values_named":{"image":"synthetic.png"},"outputs":[{"type":"IMAGE"}]},
+      {"id":2,"type":"group","inputs":[{"name":"image","type":"IMAGE","link":1}],"outputs":[{"type":"IMAGE"}]},
+      {"id":3,"type":"SaveImage","widgets_values_named":{"filename_prefix":"synthetic"},"inputs":[{"name":"images","type":"IMAGE","link":2}],"outputs":[]}
+    ],"links":[[1,1,0,2,0,"IMAGE"],[2,2,0,3,0,"IMAGE"]],"definitions":{"subgraphs":[{
+      "id":"group","inputNode":{"id":-10},"outputNode":{"id":-20},"widgets":[],
+      "inputs":[{"name":"image","type":"IMAGE"}],"outputs":[{"name":"image","type":"IMAGE"}],
+      "nodes":[{"id":9,"type":"ImageScaleBy","inputs":[{"name":"image","type":"IMAGE","link":10}],"outputs":[{"type":"IMAGE"}],"widgets_values_named":{"upscale_method":"area","scale_by":0.5}}],
+      "links":[{"id":10,"origin_id":-10,"origin_slot":0,"target_id":9,"target_slot":0,"type":"IMAGE"},{"id":11,"origin_id":9,"origin_slot":0,"target_id":-20,"target_slot":0,"type":"IMAGE"}]
+    }]}}
+    """#
+
+    func testSavedSubgraphExpandsBoundaryLinksWithoutChangingSource() throws {
+        let data = Data(subgraphSource.utf8)
+        let original = data
+        let result = try JSONValue(data: UIWorkflowConverter.convert(data: data, objectInfoData: Data(subgraphInfo.utf8)))
+        XCTAssertEqual(result["2:9"]?["inputs"]?["image"], .array([.string("1"), .integer(0)]))
+        XCTAssertEqual(result["3"]?["inputs"]?["images"], .array([.string("2:9"), .integer(0)]))
+        XCTAssertEqual(result["2:9"]?["inputs"]?["scale_by"], .decimal(0.5))
+        XCTAssertEqual(Set(result.objectValue!.keys), Set(["1", "2:9", "3"]))
+        XCTAssertEqual(data, original)
+        let canvas = try WorkflowCanvas(data: data)
+        XCTAssertEqual(canvas.visibleNodeID(for: "2:9"), "2")
+        XCTAssertEqual(canvas.visibleNodeID(for: "3"), "3")
+        XCTAssertNil(canvas.visibleNodeID(for: "20:9"))
+    }
+
+    func testBypassedSubgraphDoesNotExecuteItsContents() throws {
+        let source = subgraphSource.replacingOccurrences(of: #""id":2,"type":"group""#, with: #""id":2,"type":"group","mode":4"#)
+        let result = try convert(source, subgraphInfo)
+        XCTAssertNil(result["2:9"])
+        XCTAssertEqual(result["3"]?["inputs"]?["images"], .array([.string("1"), .integer(0)]))
+    }
+
+    func testSubgraphUnknownOverridesAndRecursiveDefinitionsAreRejected() {
+        let overrides = subgraphSource.replacingOccurrences(of: #""id":2,"type":"group""#, with: #""id":2,"type":"group","widgets_values":[99]"#)
+        XCTAssertThrowsError(try convert(overrides, subgraphInfo))
+        let recursive = subgraphSource.replacingOccurrences(of: #""id":9,"type":"ImageScaleBy""#, with: #""id":9,"type":"group""#)
+        XCTAssertThrowsError(try convert(recursive, subgraphInfo))
+        let duplicateOutput = subgraphSource.replacingOccurrences(of: #""id":10,"origin_id":-10,"origin_slot":0,"target_id":9"#, with: #""id":10,"origin_id":-10,"origin_slot":0,"target_id":-20"#)
+        XCTAssertThrowsError(try convert(duplicateOutput, subgraphInfo))
+    }
+
     private func convert(_ graph: String, _ info: String) throws -> JSONValue {
         try JSONValue(data: UIWorkflowConverter.convert(data: Data(graph.utf8), objectInfoData: Data(info.utf8)))
     }

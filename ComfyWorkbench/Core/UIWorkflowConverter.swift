@@ -10,7 +10,7 @@ public enum UIWorkflowConverter {
     }
 
     public static func convert(data: Data, objectInfoData: Data) throws -> Data {
-        let graph = try JSONValue(data: data)
+        let graph = try SubgraphExpansion.expand(JSONValue(data: data))
         let definitions = try JSONValue(data: objectInfoData)
         guard let objectInfo = definitions.objectValue, !objectInfo.isEmpty else {
             throw ConversionError("服务器没有返回节点定义，请先连接 ComfyUI。")
@@ -46,7 +46,7 @@ public enum UIWorkflowConverter {
         var visiting = Set<String>()
 
         // These are frontend-only controls in the supplied workflow, with no execution output.
-        let decorations: Set<String> = ["Note", "MarkdownNote", "忽略多组孤海"]
+        let decorations: Set<String> = ["Note", "MarkdownNote", "忽略多组孤海", "Label (rgthree)", "Fast Groups Bypasser (rgthree)"]
         let virtualTypes: Set<String> = ["SetNode", "GetNode", "Reroute"]
         let frontendWidgets: Set<String> = [
             "upload", "choose video to upload", "videopreview", "preview", "control_after_generate"
@@ -141,7 +141,7 @@ public enum UIWorkflowConverter {
             try expand(inputSchema, prefix: "", live: values, rules: &rules, node: node, depth: 0)
             try expandVideoFormat(node, live: values, rules: &rules)
             for key in Array(values.keys) where rules[key] == nil {
-                if frontendWidgets.contains(key), !connectedKeys.contains(key) {
+                if (frontendWidgets.contains(key) || isKnownFrontendWidget(key, node: node)), !connectedKeys.contains(key) {
                     values.removeValue(forKey: key)
                 } else {
                     throw ConversionError("节点 \(id)（\(node.type)）的参数 \(key) 不在服务器定义中，无法无损转换。")
@@ -220,7 +220,24 @@ public enum UIWorkflowConverter {
             return [:]
         }
 
+        func isKnownFrontendWidget(_ name: String, node: Node) -> Bool {
+            if node.type == "Image Comparer (rgthree)" { return name == "rgthree_comparer" }
+            if node.type == "Seed (rgthree)" {
+                return ["🎲 Randomize Each Time", "🎲 New Fixed Random", "USE_LAST_SEED"].contains(name)
+            }
+            return false
+        }
+
         func standardWidgets(_ node: Node, positional: [JSONValue]) throws -> [String: JSONValue] {
+            if node.type == "Image Comparer (rgthree)", positional.count == 1,
+               positional[0].arrayValue != nil || positional[0].objectValue != nil || positional[0] == .null {
+                return ["rgthree_comparer": positional[0]]
+            }
+            if node.type == "Seed (rgthree)", positional.count == 1 || positional.count == 4,
+               positional[0].integerValue != nil || positional[0].uint64Value != nil {
+                guard positional.dropFirst().allSatisfy({ $0.stringValue != nil || $0 == .null }) else { throw invalidValue(node, "seed buttons") }
+                return ["seed": positional[0]]
+            }
             if ["SetNode", "GetNode"].contains(node.type), positional.count == 1, positional[0].stringValue != nil {
                 return ["Constant": positional[0]]
             }
@@ -410,5 +427,144 @@ public enum UIWorkflowConverter {
             let b = Set(right.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) })
             return !a.isDisjoint(with: b)
         }
+    }
+}
+
+/// Expands saved, linked subgraphs only in the derived execution graph. The
+/// original canvas, coordinates, widget values and export data remain untouched.
+private enum SubgraphExpansion {
+    typealias Error = UIWorkflowConverter.ConversionError
+    static func identifier(_ value: JSONValue?) throws -> String {
+        if let string = value?.stringValue, !string.isEmpty { return string }
+        if let number = value?.integerValue { return String(number) }
+        throw Error("子图包含无效标识。")
+    }
+    static func edge(_ raw: JSONValue) throws -> [JSONValue] {
+        if let array = raw.arrayValue, array.count >= 5 { return Array(array.prefix(6)) }
+        guard let object = raw.objectValue,
+              let id = object["id"], let source = object["origin_id"], let slot = object["origin_slot"],
+              let target = object["target_id"], let targetSlot = object["target_slot"] else {
+            throw Error("子图连线格式不完整。")
+        }
+        return [id, source, slot, target, targetSlot, object["type"] ?? .string("*")]
+    }
+    static func expand(_ graph: JSONValue) throws -> JSONValue {
+        guard var root = graph.objectValue, var nodes = root["nodes"]?.arrayValue,
+              let rawLinks = root["links"]?.arrayValue else { return graph }
+        var edges = try rawLinks.map(edge)
+        var definitions: [String: JSONValue] = [:]
+        for definition in root["definitions"]?["subgraphs"]?.arrayValue ?? [] {
+            let id = try identifier(definition["id"])
+            guard definitions[id] == nil else { throw Error("工作流有重复的子图定义。") }
+            definitions[id] = definition
+        }
+        var ancestry: [String: Set<String>] = [:]
+        var expanded = 0
+        while let instanceIndex = nodes.firstIndex(where: {
+            ($0["mode"]?.integerValue ?? 0) == 0 && definitions[$0["type"]?.stringValue ?? ""] != nil
+        }) {
+            expanded += 1
+            guard expanded <= 512, nodes.count <= 10_000, edges.count <= 100_000 else { throw Error("子图展开规模过大。") }
+            let instance = nodes[instanceIndex]
+            let id = try identifier(instance["id"])
+            let type = instance["type"]!.stringValue!
+            let definition = definitions[type]!
+            var path = ancestry[id] ?? []
+            guard path.count < 32, path.insert(type).inserted else { throw Error("子图存在循环引用或嵌套过深。") }
+            guard let childNodes = definition["nodes"]?.arrayValue,
+                  let childRawLinks = definition["links"]?.arrayValue else { throw Error("子图缺少节点或连线定义。") }
+            // Promoted widgets need an explicit proxy mapping. Never silently
+            // discard instance-level overrides or guess extension widget order.
+            let promoted = definition["widgets"]?.arrayValue ?? []
+            let positional = instance["widgets_values"]?.arrayValue ?? []
+            let named = instance["widgets_values_named"]?.objectValue ?? instance["widgets_values"]?.objectValue ?? [:]
+            guard promoted.isEmpty, positional.isEmpty, named.isEmpty else {
+                throw Error("子图 \(id) 含提升到外层的控件，尚不能可靠映射；请从 ComfyUI 导出 API 工作流。")
+            }
+            let outerInputs = instance["inputs"]?.arrayValue ?? []
+            let outerOutputs = instance["outputs"]?.arrayValue ?? []
+            let inputs = definition["inputs"]?.arrayValue ?? []
+            let outputs = definition["outputs"]?.arrayValue ?? []
+            guard inputs.count == outerInputs.count, outputs.count == outerOutputs.count else {
+                throw Error("子图 \(id) 的端口数量与实例不一致。")
+            }
+            for (outer, inner) in zip(outerInputs + outerOutputs, inputs + outputs) {
+                guard outer["type"] == inner["type"] else { throw Error("子图 \(id) 的端口类型与实例不一致。") }
+            }
+            let inputID = try identifier(definition["inputNode"]?["id"])
+            let outputID = try identifier(definition["outputNode"]?["id"])
+            let childIDs = try childNodes.map { try identifier($0["id"]) }
+            guard Set(childIDs).count == childIDs.count, !childIDs.contains(inputID), !childIDs.contains(outputID) else {
+                throw Error("子图 \(id) 存在重复节点或边界标识冲突。")
+            }
+            func scoped(_ value: String) -> String { id + ":" + value }
+            func boundary(_ input: Bool, _ slot: Int) -> String { scoped((input ? "__in" : "__out") + String(slot)) }
+            var incoming: [Int: JSONValue] = [:]
+            for index in edges.indices {
+                if try identifier(edges[index][1]) == id {
+                    guard let slot = edges[index][2].integerValue, slot >= 0, slot < outputs.count else { throw Error("子图输出连线越界。") }
+                    edges[index][1] = .string(boundary(false, Int(slot))); edges[index][2] = .integer(0)
+                }
+                if try identifier(edges[index][3]) == id {
+                    guard let slot = edges[index][4].integerValue, slot >= 0, slot < inputs.count,
+                          incoming[Int(slot)] == nil,
+                          try identifier(outerInputs[Int(slot)]["link"]) == identifier(edges[index][0]) else {
+                        throw Error("子图输入连线不完整或重复。")
+                    }
+                    incoming[Int(slot)] = edges[index][0]
+                    edges[index][3] = .string(boundary(true, Int(slot))); edges[index][4] = .integer(0)
+                }
+            }
+            for (slot, port) in outerInputs.enumerated() where port["link"] != nil && port["link"] != .null {
+                guard incoming[slot] != nil else { throw Error("子图输入缺少对应连线。") }
+            }
+            var outgoing: [Int: JSONValue] = [:]
+            var childEdges = try childRawLinks.map(edge)
+            for index in childEdges.indices {
+                childEdges[index][0] = .string(scoped("link:" + (try identifier(childEdges[index][0]))))
+                let source = try identifier(childEdges[index][1])
+                let target = try identifier(childEdges[index][3])
+                if source == inputID {
+                    guard let slot = childEdges[index][2].integerValue, slot >= 0, slot < inputs.count else { throw Error("子图内部输入越界。") }
+                    childEdges[index][1] = .string(boundary(true, Int(slot))); childEdges[index][2] = .integer(0)
+                } else {
+                    guard childIDs.contains(source) else { throw Error("子图内部连线来源不存在。") }
+                    childEdges[index][1] = .string(scoped(source))
+                }
+                if target == outputID {
+                    guard let slot = childEdges[index][4].integerValue, slot >= 0, slot < outputs.count, outgoing[Int(slot)] == nil else { throw Error("子图内部输出越界或有多个来源。") }
+                    outgoing[Int(slot)] = childEdges[index][0]
+                    childEdges[index][3] = .string(boundary(false, Int(slot))); childEdges[index][4] = .integer(0)
+                } else {
+                    guard childIDs.contains(target) else { throw Error("子图内部连线目标不存在。") }
+                    childEdges[index][3] = .string(scoped(target))
+                }
+            }
+            var expandedNodes: [JSONValue] = []
+            for (child, childID) in zip(childNodes, childIDs) {
+                var raw = child.objectValue!
+                raw["id"] = .string(scoped(childID))
+                raw["inputs"] = .array(try (child["inputs"]?.arrayValue ?? []).map { input in
+                    guard var port = input.objectValue else { throw Error("子图输入端口无效。") }
+                    if let link = port["link"], link != .null { port["link"] = .string(scoped("link:" + (try identifier(link)))) }
+                    return .object(port)
+                })
+                ancestry[scoped(childID)] = path
+                expandedNodes.append(.object(raw))
+            }
+            for (isInput, ports, connected) in [(true, inputs, incoming), (false, outputs, outgoing)] {
+                for (slot, port) in ports.enumerated() {
+                    let socketType = port["type"] ?? .string("*")
+                    expandedNodes.append(.object([
+                        "id": .string(boundary(isInput, slot)), "type": .string("Reroute"),
+                        "inputs": .array([.object(["name": .string("value"), "type": socketType, "link": connected[slot] ?? .null])]),
+                        "outputs": .array([.object(["name": .string("value"), "type": socketType])])
+                    ]))
+                }
+            }
+            nodes.remove(at: instanceIndex); nodes.append(contentsOf: expandedNodes); edges.append(contentsOf: childEdges)
+        }
+        root["nodes"] = .array(nodes); root["links"] = .array(edges.map(JSONValue.array))
+        return .object(root)
     }
 }

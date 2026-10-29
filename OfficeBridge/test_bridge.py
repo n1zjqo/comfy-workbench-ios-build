@@ -68,6 +68,28 @@ class BridgeTests(unittest.TestCase):
         self.gate.control('resume')
         self.assertTrue(self.up.loaded)
         self.assertFalse(self.gate.paused)
+    def test_release_waits_for_vram_telemetry_after_engine_exit(self):
+        original = self.up.json
+        samples = iter([100, 100, 32000])
+        def delayed(path, *args, **kwargs):
+            if path == '/v1/status' and not self.up.loaded:
+                self.up.free = next(samples, 32000)
+            return original(path, *args, **kwargs)
+        self.up.json = delayed
+        with patch('bridge.time.sleep') as wait:
+            self.gate.control('release')
+        self.assertEqual(wait.call_count, 2)
+        with self.gate.admission():
+            pass
+        self.assertFalse(self.gate.paused)
+    def test_unload_telemetry_wait_is_bounded_and_low_memory_still_blocks_load(self):
+        self.up.free = 100
+        with patch('bridge.time.monotonic', side_effect=[0, 0, 16]), patch('bridge.time.sleep'):
+            self.gate.control('release')
+        self.assertFalse(self.up.loaded)
+        self.assertFalse(self.gate.maintenance)
+        with self.assertRaises(Failure):
+            self.gate.control('load')
     def test_pause_drains_in_flight_without_interrupting(self):
         with self.gate.admission():
             self.gate.control('pause')
@@ -132,6 +154,24 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaises(Failure):
             self.gate.control('free_comfy')
         self.assertNotIn('/free', self.up.calls)
+    def test_free_comfy_while_paused_does_not_resume_strata(self):
+        self.gate.control('pause')
+        self.up.free = 100
+        self.up.comfy_running = ['job']
+        with self.assertRaises(Failure):
+            self.gate.control('free_comfy')
+        self.assertNotIn('/free', self.up.calls)
+        self.up.comfy_running = []
+        self.gate.control('free_comfy')
+        self.assertIn('/free', self.up.calls)
+        self.assertNotIn('/load', self.up.calls)
+        self.assertFalse(self.up.loaded)
+        self.assertTrue(self.gate.paused)
+        self.assertTrue(Gateway(self.config, self.up).paused)
+        with self.assertRaises(Failure) as caught:
+            with self.gate.admission():
+                pass
+        self.assertEqual(caught.exception.status, 423)
     def test_mutating_unknown_tool_is_rejected(self):
         with self.assertRaises(Failure):
             self.gate.tool('shell', {'command': 'echo bad'}, approved=True)
@@ -165,6 +205,22 @@ class BridgeTests(unittest.TestCase):
         for url in ('https://example.com', 'http://192.168.1.20', 'http://name:secret@127.0.0.1'):
             with self.assertRaises(ValueError):
                 Upstream(url, 'synthetic')
+    def test_comfy_free_accepts_empty_success_response(self):
+        upstream = Upstream('http://127.0.0.1:18086', 'synthetic', 'http://127.0.0.1:1249')
+        for status in (200, 204):
+            response = io.BytesIO(b''); response.status = status
+            with patch.object(upstream, 'open', return_value=response):
+                self.assertEqual(upstream.json('/free', {'unload_models': True}, comfy=True), {})
+    def test_empty_status_is_not_mistaken_for_success(self):
+        upstream = Upstream('http://127.0.0.1:18086', 'synthetic')
+        response = io.BytesIO(b''); response.status = 200
+        with patch.object(upstream, 'open', return_value=response), self.assertRaises(json.JSONDecodeError):
+            upstream.json('/v1/status')
+    def test_comfy_free_html_is_not_mistaken_for_success(self):
+        upstream = Upstream('http://127.0.0.1:18086', 'synthetic', 'http://127.0.0.1:1249')
+        response = io.BytesIO(b'<html>unavailable</html>'); response.status = 200
+        with patch.object(upstream, 'open', return_value=response), self.assertRaises(json.JSONDecodeError):
+            upstream.json('/free', {'unload_models': True}, comfy=True)
     def request(self, path, body=None, key='synthetic-secret', size=None):
         handler = object.__new__(Handler)
         handler.path = path

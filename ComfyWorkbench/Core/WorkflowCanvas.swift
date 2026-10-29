@@ -30,7 +30,7 @@ public struct WorkflowCanvas {
     public private(set) var widgetOrder: [String: [String]]
     public let originalLayout: Bool
     private let info: ObjectInfo?
-    private static let decorations: Set<String> = ["Note", "MarkdownNote", "忽略多组孤海"]
+    private static let decorations: Set<String> = ["Note", "MarkdownNote", "忽略多组孤海", "Label (rgthree)"]
 
     public init(data: Data, objectInfo: ObjectInfo? = nil, widgetOrder: [String: [String]] = [:]) throws {
         let normalized = try WorkflowImportData.normalized(data)
@@ -87,6 +87,11 @@ public struct WorkflowCanvas {
         return Data(try encode(root).utf8)
     }
     public var fields: [WorkflowField] { nodes.flatMap(\.fields) }
+    public func visibleNodeID(for executionID: String?) -> String? {
+        guard let executionID = executionID else { return nil }
+        if nodes.contains(where: { $0.id == executionID }) { return executionID }
+        return nodes.filter { executionID.hasPrefix($0.id + ":") }.max { $0.id.count < $1.id.count }?.id
+    }
 
     public mutating func update(fieldID: String, fromText text: String) throws {
         guard let field = fields.first(where: { $0.id == fieldID }) else { throw WorkflowError.invalid("找不到这个参数。") }
@@ -164,6 +169,10 @@ public struct WorkflowCanvas {
             })
             let controls: Set<String> = ["upload", "choose video to upload", "videopreview", "preview", "control_after_generate"]
             fields.removeAll { connected.contains($0.name) || controls.contains($0.name) }
+            if type == "Seed (rgthree)" {
+                let buttons: Set<String> = ["🎲 Randomize Each Time", "🎲 New Fixed Random", "USE_LAST_SEED"]
+                fields.removeAll { buttons.contains($0.name) && info?.schema(for: type, input: $0.name) == nil }
+            }
             result.append(CanvasNode(id: id, type: type, x: position.0, y: position.1, width: size.0,
                                      height: raw["flags"]?["collapsed"]?.boolValue == true ? 34 : size.1,
                                      inputs: (raw["inputs"]?.arrayValue ?? []).map { $0["name"]?.stringValue ?? "input" },

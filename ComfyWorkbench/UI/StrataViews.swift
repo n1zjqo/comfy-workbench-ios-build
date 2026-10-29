@@ -75,6 +75,13 @@ struct PlacesConnectionPage: View {
                             }.font(.subheadline)
                         }
                         Text("释放显存：空闲时卸载，下次对话自动加载。\n暂停接收：拒绝新请求，当前生成完成后卸载，手动恢复后继续。\n两项操作都会保留控制服务，方便你远程重新开启。").font(.caption).foregroundColor(.secondary).lineSpacing(4)
+                        if strata.status?.gpuPolicy == "comfy_priority" {
+                            Text("ComfyUI 优先：生成前自动让出显存，队列空闲 10 秒后恢复 Strata。手动暂停后不会自动恢复。")
+                                .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+                            if let issue = strata.status?.gpuError, !issue.isEmpty {
+                                Text(issue).font(.caption).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
                         HStack {
                             if strata.busy { ProgressView().scaleEffect(0.8); Text("操作进行中").font(.caption) }
                             Spacer()
@@ -162,6 +169,8 @@ struct StrataChatPage: View {
     @State private var image: UIImage?
     @State private var photoPicker = false
     @State private var imagePreview = false
+    @State private var expandedInput = false
+    @State private var handoff: PromptHandoff?
     @State private var review: StrataTask?
     @FocusState private var composerFocused: Bool
     var body: some View {
@@ -195,7 +204,13 @@ struct StrataChatPage: View {
                                     if !message.content.isEmpty { StrataCopyButton(text: message.content) }
                                 }
                                 if let data = message.image, let picture = UIImage(data: data) { Image(uiImage: picture).resizable().scaledToFit().frame(maxHeight: 180).clipShape(RoundedRectangle(cornerRadius: 12)) }
-                                Text(message.content.isEmpty ? "正在思考…" : message.content).font(.body).textSelection(.enabled)
+                                if message.content.isEmpty { Text("正在思考…").foregroundColor(.secondary) }
+                                else { SelectableMessageText(text: message.content) }
+                                if message.role == "assistant" && !message.content.isEmpty {
+                                    Button { handoff = PromptHandoff(text: message.content) } label: {
+                                        Label("用于 ComfyUI", systemImage: "wand.and.stars").font(.subheadline).frame(minHeight: 44)
+                                    }.buttonStyle(.plain).disabled(strata.chatting)
+                                }
                             }.padding(16).frame(maxWidth: .infinity, alignment: .leading).glass(18)
                         }
                     } else {
@@ -206,7 +221,7 @@ struct StrataChatPage: View {
                                 Text("执行位置：办公室 5090").font(.caption).foregroundColor(.secondary)
                                 ForEach(Array(task.events.enumerated()), id: \.offset) { _, event in Text(event).font(.caption).foregroundColor(.secondary) }
                                 if !task.output.isEmpty {
-                                    Text(task.output).font(.subheadline).textSelection(.enabled)
+                                    SelectableMessageText(text: task.output)
                                     StrataCopyButton(text: task.output)
                                 }
                                 HStack {
@@ -227,6 +242,9 @@ struct StrataChatPage: View {
                     TextField(mode == 0 ? "给 Strata 发消息…" : "描述文件任务…", text: $strata.draft)
                         .focused($composerFocused).submitLabel(.send).onSubmit { submitDraft() }
                         .disabled(strata.busy).padding(.vertical, 12)
+                    Button { composerFocused = false; expandedInput = true } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 44, height: 44)
+                    }.accessibilityLabel("展开输入框")
                     if strata.chatting {
                         Button { strata.stopChat() } label: { Image(systemName: "stop.fill").frame(width: 44, height: 44) }.accessibilityLabel("停止接收")
                     } else {
@@ -242,6 +260,10 @@ struct StrataChatPage: View {
             }
         }
         .sheet(isPresented: $photoPicker) { PhotoPicker { image = $0 } }
+        .sheet(isPresented: $expandedInput) {
+            ExpandedComposer(title: mode == 0 ? "编辑消息" : "编辑任务", text: $strata.draft)
+        }
+        .sheet(item: $handoff) { item in ComfyPromptHandoff(initialText: item.text) }
         .sheet(isPresented: $imagePreview) {
             NavigationView {
                 Group {
@@ -258,7 +280,7 @@ struct StrataChatPage: View {
                     VStack(alignment: .leading, spacing: 16) {
                         Text("办公室 5090").font(.headline)
                         Text("新文件：" + (task.pending?.arguments["path"] ?? "")).font(.subheadline)
-                        Text(task.pending?.arguments["content"] ?? "").font(.body).textSelection(.enabled)
+                        SelectableMessageText(text: task.pending?.arguments["content"] ?? "")
                         StrataCopyButton(text: task.pending?.arguments["content"] ?? "")
                         Button("确认创建此文件") { Task { await strata.taskAction(task, action: "approve"); review = nil } }.buttonStyle(.borderedProminent).disabled(strata.busy)
                     }.padding(24)
@@ -337,5 +359,152 @@ struct StrataAttachmentPreview: View {
                     .frame(width: 44, height: 44).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityLabel("移除已选图片")
         }.padding(.horizontal, 6).padding(.vertical, 4)
+    }
+}
+
+struct PromptHandoff: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
+struct ComfyPromptHandoff: View {
+    @EnvironmentObject var store: WorkbenchStore
+    @EnvironmentObject var strata: StrataStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String
+    init(initialText: String) { _text = State(initialValue: initialText) }
+    var body: some View {
+        NavigationView {
+            VStack(alignment: .leading, spacing: 16) {
+                Menu {
+                    ForEach(store.workflows) { workflow in Button(workflow.name) { store.select(workflow.id) } }
+                } label: {
+                    HStack { Text(store.selected?.name ?? "请先导入工作流").lineLimit(2); Spacer(); Image(systemName: "chevron.down") }
+                        .font(.subheadline).frame(minHeight: 44)
+                }.disabled(store.busy)
+                Text("检查反推内容，保留要用于生成的提示词。").font(.caption).foregroundColor(.secondary)
+                DraftTextEditor(text: $text).disabled(store.busy)
+                    .padding(8).background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 18))
+                Text(store.currentPromptField.map { "写入参数：" + $0.name } ?? "请到应用页选择聊天提示词入口")
+                    .font(.caption).foregroundColor(.secondary)
+                Button {
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    let count = store.jobs.count
+                    Task {
+                        await store.submit(message: text)
+                        // A prompt ID confirms acceptance. Never automatically replay an uncertain POST.
+                        if store.jobs.count > count, store.jobs.last?.promptID != nil {
+                            strata.assistantSelected = false; dismiss()
+                        }
+                    }
+                } label: {
+                    HStack { if store.busy { ProgressView() }; Text("在 ComfyUI 生成") }.frame(maxWidth: .infinity, minHeight: 48)
+                }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink)
+                    .disabled(store.busy || store.document == nil || store.currentPromptField == nil || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }.padding(22).background(Palette.workspace.ignoresSafeArea())
+                .navigationTitle("用于 ComfyUI").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("返回") { dismiss() }.disabled(store.busy) } }
+        }.navigationViewStyle(.stack).interactiveDismissDisabled(store.busy)
+    }
+}
+
+struct ExpandedComposer: View {
+    let title: String
+    @Binding var text: String
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 12) {
+                DraftTextEditor(text: $text).padding(8)
+                HStack { Text("换行、选字与粘贴"); Spacer(); Text("\(text.count) 字").monospacedDigit() }
+                    .font(.caption).foregroundColor(.secondary).padding(.horizontal, 12)
+            }.padding(14).background(Palette.workspace.ignoresSafeArea())
+                .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") {
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                        dismiss()
+                    }
+                } }
+        }.navigationViewStyle(.stack)
+    }
+}
+
+struct DraftTextEditor: UIViewRepresentable {
+    @Binding var text: String
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.backgroundColor = .clear; view.textColor = .label
+        view.font = .preferredFont(forTextStyle: .body); view.adjustsFontForContentSizeCategory = true
+        view.textContainerInset = UIEdgeInsets(top: 12, left: 8, bottom: 12, right: 8)
+        view.keyboardDismissMode = .interactive; view.alwaysBounceVertical = true
+        view.delegate = context.coordinator; view.accessibilityLabel = "展开的输入框"
+        return view
+    }
+    func updateUIView(_ view: UITextView, context: Context) {
+        context.coordinator.parent = self
+        // Leave Chinese IME marked text and its selection under UIKit's control.
+        if view.markedTextRange == nil && view.text != text { view.text = text }
+    }
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: DraftTextEditor
+        init(_ parent: DraftTextEditor) { self.parent = parent }
+        func textViewDidChange(_ textView: UITextView) { parent.text = textView.text }
+    }
+}
+
+/// Native selection handles on iOS 15; selecting a range never writes the clipboard.
+struct SelectableMessageText: View {
+    let text: String
+    @State private var height: CGFloat = 24
+    var body: some View {
+        NativeSelectableText(text: text, height: $height).frame(height: height)
+    }
+}
+
+struct NativeSelectableText: UIViewRepresentable {
+    let text: String
+    @Binding var height: CGFloat
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeUIView(context: Context) -> SelectionTextView {
+        let view = SelectionTextView()
+        view.isEditable = false; view.isSelectable = true; view.isScrollEnabled = false
+        view.backgroundColor = .clear; view.textColor = .label; view.tintColor = UIColor(Palette.paper)
+        view.font = .preferredFont(forTextStyle: .body); view.adjustsFontForContentSizeCategory = true
+        view.textContainerInset = .zero; view.textContainer.lineFragmentPadding = 0
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.delegate = context.coordinator
+        return view
+    }
+    func updateUIView(_ view: SelectionTextView, context: Context) {
+        view.onHeight = { value in if abs(height - value) > 0.5 { height = value } }
+        view.pendingText = text; view.applyPendingText()
+    }
+    final class Coordinator: NSObject, UITextViewDelegate {
+        func textViewDidChangeSelection(_ textView: UITextView) { (textView as? SelectionTextView)?.applyPendingText() }
+        func textViewDidEndEditing(_ textView: UITextView) { (textView as? SelectionTextView)?.applyPendingText() }
+    }
+}
+
+final class SelectionTextView: UITextView {
+    var pendingText = ""
+    var onHeight: ((CGFloat) -> Void)?
+    private var applying = false
+    func applyPendingText() {
+        guard !applying, !(isFirstResponder && selectedRange.length > 0), text != pendingText else { return }
+        applying = true
+        let selection = selectedRange
+        text = pendingText
+        let count = (pendingText as NSString).length
+        selectedRange = NSRange(location: min(selection.location, count), length: 0)
+        applying = false
+        setNeedsLayout()
+    }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds.width > 0 else { return }
+        let measured = ceil(sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude)).height)
+        DispatchQueue.main.async { [weak self] in self?.onHeight?(max(24, measured)) }
     }
 }
