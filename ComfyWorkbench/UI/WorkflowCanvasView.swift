@@ -103,6 +103,12 @@ struct WorkflowCanvasView: View {
                 Spacer(minLength: 0)
                 Button { selected = nil } label: { Image(systemName: "xmark").font(.system(size: 12, weight: .semibold)).frame(width: 44, height: 44) }.accessibilityLabel("收起节点参数")
             }.padding(.horizontal, 16).padding(.vertical, 12)
+            if !node.fields.isEmpty {
+                Toggle("显示到常用参数", isOn: Binding(get: { store.nodeIsInPanel(node) }, set: { enabled in
+                    do { try store.showNodeInPanel(node.id, enabled: enabled) } catch { store.error = error.localizedDescription }
+                })).font(.subheadline).tint(.mint).padding(.horizontal, 18).padding(.bottom, 12).disabled(store.busy)
+                    .accessibilityIdentifier("node-common-parameters")
+            }
             Divider().overlay(.white.opacity(0.08))
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {

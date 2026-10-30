@@ -16,8 +16,8 @@ struct WorkflowPage: View {
     @State private var pendingDelete: UUID?
     var fields: [WorkflowField] {
         let available = store.canvas?.fields ?? []
-        let base = allParameters ? available : store.panelItems.compactMap { item in available.first { $0.id == item.id && !$0.schema.isUpload } }
-        guard !search.isEmpty else { return base }
+        let base = allParameters ? available : store.panelItems.compactMap { item in available.first { $0.id == item.id } }
+        guard allParameters, !search.isEmpty else { return base }
         return base.filter { "\($0.name) \($0.nodeType) \($0.nodeID)".localizedCaseInsensitiveContains(search) }
     }
     var body: some View {
@@ -71,8 +71,8 @@ struct WorkflowPage: View {
                     if allParameters { TextField("搜索参数或节点", text: $search).padding(12).background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12)) }
                     if fields.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text(allParameters ? "没有匹配的参数" : "选择常用参数，组成自己的应用").font(.subheadline).foregroundColor(.secondary)
-                            if !allParameters { Button("选择参数") { manageFields = true }.frame(minHeight: 44) }
+                            Text(allParameters ? "没有匹配的参数" : "在画布点选节点，开启“显示到常用参数”。这里仅显示你手动选定的内容。").font(.subheadline).foregroundColor(.secondary)
+                            if !allParameters { Button("去画布选择节点") { graph = true }.frame(minHeight: 44) }
                         }.padding(.vertical, 16)
                     }
                     if allParameters {
@@ -82,7 +82,10 @@ struct WorkflowPage: View {
                                 Divider().padding(.leading, 16)
                             }
                         }.background(Palette.surface, in: RoundedRectangle(cornerRadius: 18)).clipShape(RoundedRectangle(cornerRadius: 18))
-                    } else { ApplicationPanel { editing = $0 } }
+                    } else {
+                        ApplicationPanel { editing = $0 }
+                        if !fields.isEmpty { Button("在画布选择节点") { graph = true }.font(.subheadline).frame(minHeight: 44) }
+                    }
                     HStack {
                         Label("更改自动保存", systemImage: "checkmark.circle").font(.caption2).foregroundColor(.secondary)
                         Spacer()
@@ -171,6 +174,7 @@ struct FieldEditor: View {
     @State private var leaving = false
     @State private var restoredDraft = false
     @State private var mediaUploading = false
+    @State private var useReference = true
     private var filteredChoices: [JSONValue] { field.schema.options.filter { filter.isEmpty || $0.displayValue.localizedCaseInsensitiveContains(filter) } }
     init(field: WorkflowField, configuration: PanelFieldConfiguration? = nil) { self.field = field; self.configuration = configuration; _text = State(initialValue: field.value.displayValue) }
     var body: some View {
@@ -183,6 +187,10 @@ struct FieldEditor: View {
                         VStack(alignment: .leading, spacing: 14) {
                             ReferenceMaterialEditor(field: field, value: $text, uploading: $mediaUploading)
                             TextField("服务器素材文件名", text: $text).textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder)
+                            if store.canvas?.originalLayout == true {
+                                Toggle("生成时使用此参考", isOn: $useReference).tint(.mint).disabled(mediaUploading)
+                                Text("保存后生效。关闭会保留素材与连线，暂不参与生成。").font(.caption).foregroundColor(.secondary)
+                            }
                         }
                     }
                 } else if field.schema.kind == .choice {
@@ -215,14 +223,20 @@ struct FieldEditor: View {
             .navigationTitle(configuration?.title(for: field) ?? field.name).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { leaving = true; store.saveEditorDraft(field.id, text: nil); presentation.wrappedValue.dismiss() }.disabled(mediaUploading || store.busy) }
-                ToolbarItem(placement: .confirmationAction) { Button("保存") { do { try store.edit(field, text: text); if field.name.lowercased().contains("seed") { try store.setRandomSeed(field.id, enabled: randomSeed) }; leaving = true; presentation.wrappedValue.dismiss() } catch { self.error = error.localizedDescription } }.disabled(mediaUploading || store.busy) }
+                ToolbarItem(placement: .confirmationAction) { Button("保存") { do {
+                    if field.schema.isUpload { try store.editReference(field, text: text, enabled: useReference) }
+                    else { try store.edit(field, text: text) }
+                    if field.name.lowercased().contains("seed") { try store.setRandomSeed(field.id, enabled: randomSeed) }
+                    leaving = true; presentation.wrappedValue.dismiss()
+                } catch { self.error = error.localizedDescription } }.disabled(mediaUploading || store.busy) }
             }
         }.navigationViewStyle(.stack).interactiveDismissDisabled(mediaUploading || store.busy)
         .onAppear {
             randomSeed = store.selected?.randomSeedFields.contains(field.id) ?? false
+            useReference = store.canvas?.nodes.first(where: { $0.id == field.nodeID })?.bypassed != true
             if let draft = store.editorDraft(field.id), draft != field.value.displayValue { text = draft; restoredDraft = true }
         }
-        .onChange(of: text) { if !leaving { store.saveEditorDraft(field.id, text: $0) } }
+        .onChange(of: text) { if field.schema.isUpload && $0.isEmpty { useReference = false }; if !leaving { store.saveEditorDraft(field.id, text: $0) } }
         .onDisappear { store.saveDraftsNow() }
     }
 }
@@ -259,11 +273,12 @@ struct ReferenceMaterialSection: View {
     var body: some View {
         if !inputs.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
-                HStack { Text("参考素材").font(.headline); Spacer(); Text("已选 \(inputs.filter { !$0.field.value.displayValue.isEmpty }.count) / \(inputs.count)").font(.caption).monospacedDigit().foregroundColor(.secondary) }
+                HStack { Text("参考素材").font(.headline); Spacer(); Text("启用 \(inputs.filter(\.enabled).count) / \(inputs.count)").font(.caption).monospacedDigit().foregroundColor(.secondary) }
                 ForEach(groups) { group in
                     if groups.count > 1 { Text(groupTitle(group)).font(.caption.weight(.medium)).foregroundColor(Palette.paper.opacity(0.65)).padding(.top, 6) }
                     if group.layout == .rows {
-                        ForEach(group.inputs) { input in
+                        ForEach(group.inputs.filter(\.enabled)) { input in
+                            VStack(alignment: .leading, spacing: 8) {
                             HStack(spacing: 8) {
                                 Button { edit(input.field) } label: {
                                     HStack(spacing: 12) {
@@ -274,9 +289,12 @@ struct ReferenceMaterialSection: View {
                                     }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                                 }.buttonStyle(.plain)
                                 if group.kind == .audio, !input.field.value.displayValue.isEmpty { playButton(input.field) }
+                            }
+                            referenceToggle(input)
                             }.padding(14).glass(16)
                         }
-                    } else { visualGroup(group) }
+                    } else { visualGroup(WorkflowReferenceGroup(kind: group.kind, inputs: group.inputs.filter(\.enabled))) }
+                    ForEach(group.inputs.filter { !$0.enabled }) { input in inactiveReference(input) }
                 }
                 if let error = error { Text(error).font(.caption).foregroundColor(.orange) }
             }.padding(.vertical, 6).disabled(store.busy)
@@ -308,6 +326,7 @@ struct ReferenceMaterialSection: View {
             if input.field.materialKind == .video, !input.field.value.displayValue.isEmpty {
                 HStack { Text("预览视频").font(.caption).foregroundColor(.secondary); Spacer(); playButton(input.field) }
             }
+            referenceToggle(input)
         }.padding(12).frame(maxWidth: cardWidth(input, paired: paired), alignment: .topLeading).glass(16)
     }
     private func caption(_ input: WorkflowReferenceInput) -> some View {
@@ -323,6 +342,31 @@ struct ReferenceMaterialSection: View {
             Text("\(input.field.nodeType) #\(input.field.nodeID) / \(input.field.name)").font(.caption2).foregroundColor(.secondary).lineLimit(2)
             if input.destinations.count > 1 { Text("共用至 \(input.destinations.count) 个输入").font(.caption2).foregroundColor(.secondary) }
         }.accessibilityElement(children: .combine)
+    }
+    private func inactiveReference(_ input: WorkflowReferenceInput) -> some View {
+        HStack(spacing: 12) {
+            Button { edit(input.field) } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: input.field.materialIcon).font(.system(size: 23, weight: .light)).frame(width: 38)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(input.role ?? input.field.materialTitle).font(.subheadline.weight(.medium))
+                        Text("未启用 · 点此选择或更换素材").font(.caption).foregroundColor(.secondary)
+                        Text("\(input.field.nodeType) #\(input.field.nodeID)").font(.caption2).foregroundColor(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }.frame(maxWidth: .infinity, minHeight: 60, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(.plain)
+            Button("启用") { toggleReference(input, true) }.font(.caption.weight(.semibold)).frame(minWidth: 44, minHeight: 44)
+        }.padding(12).background(Palette.surface.opacity(0.65), in: RoundedRectangle(cornerRadius: 16))
+    }
+    @ViewBuilder private func referenceToggle(_ input: WorkflowReferenceInput) -> some View {
+        if store.canvas?.originalLayout == true {
+            Toggle("参与生成", isOn: Binding(get: { input.enabled }, set: { toggleReference(input, $0) })).font(.caption).tint(.mint)
+        }
+    }
+    private func toggleReference(_ input: WorkflowReferenceInput, _ enabled: Bool) {
+        do { try store.setReferenceEnabled(input.field, enabled: enabled); error = nil }
+        catch { self.error = error.localizedDescription }
     }
     private func groupTitle(_ group: WorkflowReferenceGroup) -> String {
         let title: String

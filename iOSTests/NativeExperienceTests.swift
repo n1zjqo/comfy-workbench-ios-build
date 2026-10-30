@@ -6,6 +6,90 @@ import WebKit
 @testable import ComfyWorkbench
 
 final class NativeExperienceTests: XCTestCase {
+    @MainActor func testInactiveMixedReferencesAreVisibleWithoutFetchingOldMedia() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { NativeComfyProtocol.reset(); try? FileManager.default.removeItem(at: folder) }
+        let store = WorkbenchStore(storageURL: folder, clientFactory: NativeComfyProtocol.client)
+        store.server = ServerConfig(baseURL: "https://example.com")
+        let workflow = SavedWorkflow(name: "Synthetic mixed references", data: Data(#"{"nodes":[{"id":1,"type":"LoadImage","mode":4,"widgets_values":["old.png"]},{"id":2,"type":"LoadImage","mode":2,"widgets_values":["second.png"]},{"id":3,"type":"VHS_LoadVideo","mode":4,"widgets_values":{"video":"old.mp4"}},{"id":4,"type":"LoadAudio","mode":4,"widgets_values":{"audio":"old.wav"}}],"links":[]}"#.utf8))
+        store.workflows = [workflow]; store.select(workflow.id)
+        let window = try host(ScrollView { ReferenceMaterialSection { _ in }.padding(20) }.background(Palette.workspace).environmentObject(store).preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(store.canvas?.referenceGroups.map { $0.inputs.count }, [2, 1, 1])
+        XCTAssertEqual(store.canvas?.referenceGroups.flatMap(\.inputs).filter(\.enabled).count, 0)
+        XCTAssertTrue(NativeComfyProtocol.paths.isEmpty)
+        try capturePreview(window, name: "reference-disabled-mixed")
+    }
+    @MainActor func testCommonParametersAreManualNodeSelectionsWithPersistentUndo() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("synthetic.json")
+        try Data(#"{"1":{"class_type":"Sampler","inputs":{"steps":8,"cfg":1}},"2":{"class_type":"LoadImage","inputs":{"image":"synthetic.png"}}}"#.utf8).write(to: url)
+        let store = WorkbenchStore(storageURL: folder)
+        await store.importWorkflow(url)
+        XCTAssertNil(store.error); XCTAssertTrue(store.panelItems.isEmpty)
+        store.workflows[0].panelItems = nil; store.workflows[0].pinned = ["1.steps", "1.cfg"]
+        XCTAssertTrue(store.panelItems.isEmpty) // Legacy automatic inference is no longer the panel.
+        var manual = PanelFieldConfiguration(id: "1.steps"); manual.label = "采样步数"
+        try store.configurePanel([manual])
+        try store.showNodeInPanel("1", enabled: true)
+        XCTAssertEqual(store.panelItems.first, manual)
+        XCTAssertEqual(Set(store.panelItems.map(\.id)), ["1.steps", "1.cfg"])
+        try store.showNodeInPanel("2", enabled: true)
+        XCTAssertTrue(store.panelItems.contains { $0.id == "2.image" })
+        let restored = WorkbenchStore(storageURL: folder)
+        XCTAssertEqual(restored.panelItems, store.panelItems)
+        restored.undoEdit(); XCTAssertFalse(restored.panelItems.contains { $0.id == "2.image" })
+        restored.redoEdit(); XCTAssertTrue(restored.panelItems.contains { $0.id == "2.image" })
+        try restored.showNodeInPanel("1", enabled: false)
+        XCTAssertEqual(restored.panelItems.map(\.id), ["2.image"])
+        restored.undoEdit(); XCTAssertEqual(restored.panelItems.first, manual)
+        let window = try host(WorkflowPage().environmentObject(restored).preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        try capturePreview(window, name: "reference-manual-common-parameters")
+    }
+    @MainActor func testReferenceSaveAndEnableAreOneUndoableEdit() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = WorkbenchStore(storageURL: folder)
+        let workflow = SavedWorkflow(name: "Synthetic references", data: Data(#"{"nodes":[{"id":1,"type":"LoadImage","mode":4,"widgets_values":["old.png"],"outputs":[{"name":"IMAGE","type":"IMAGE"}]}],"links":[]}"#.utf8))
+        store.workflows = [workflow]; store.select(workflow.id)
+        let field = try XCTUnwrap(store.canvas?.fields.first)
+        XCTAssertThrowsError(try store.editReference(field, text: "", enabled: true))
+        XCTAssertEqual(store.canvas?.fields.first?.value, .string("old.png"))
+        try store.editReference(field, text: "new.png", enabled: true)
+        XCTAssertEqual(store.canvas?.nodes.first?.bypassed, false)
+        XCTAssertEqual(store.selected?.journal?.past.count, 1)
+        store.undoEdit()
+        XCTAssertEqual(store.canvas?.nodes.first?.bypassed, true)
+        XCTAssertEqual(store.canvas?.fields.first?.value, .string("old.png"))
+        store.redoEdit()
+        XCTAssertEqual(store.canvas?.fields.first?.value, .string("new.png"))
+        try store.editReference(field, text: "", enabled: false)
+        let restored = WorkbenchStore(storageURL: folder)
+        XCTAssertEqual(restored.canvas?.nodes.first?.bypassed, true)
+        restored.undoEdit()
+        XCTAssertEqual(restored.canvas?.nodes.first?.bypassed, false)
+        XCTAssertEqual(restored.canvas?.fields.first?.value, .string("new.png"))
+    }
+    @MainActor func testClearStaleBackgroundKeepsWorkflowAndPersists() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = WorkbenchStore(storageURL: folder)
+        let workflow = SavedWorkflow(name: "Synthetic", data: Data(#"{"1":{"class_type":"Text","inputs":{"text":"example"}}}"#.utf8))
+        store.workflows = [workflow]; store.select(workflow.id)
+        store.setBackground(testImage())
+        try store.clearBackground()
+        XCTAssertNil(store.background)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("background.jpg").path))
+        let restored = WorkbenchStore(storageURL: folder)
+        XCTAssertNil(restored.background); XCTAssertEqual(restored.selected?.data, workflow.data)
+        let window = try host(ChatView(clean: .constant(false)).environmentObject(restored).preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        try capturePreview(window, name: "reference-chat-header")
+    }
     @MainActor func testComfyConnectionProbeIsLightweightQuietAndReusesClient() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { NativeComfyProtocol.reset(); try? FileManager.default.removeItem(at: folder) }

@@ -2,6 +2,15 @@ import XCTest
 @testable import ComfyWorkbenchCore
 
 final class WorkflowCanvasTests: XCTestCase {
+    func testVideoNamedAndDictionaryWidgetsStayInSync() throws {
+        var canvas = try graph(#"{"nodes":[{"id":1,"type":"VHS_LoadVideo","widgets_values_named":{"video":"old.mp4","force_rate":24},"widgets_values":{"video":"old.mp4","force_rate":24},"mode":4}],"links":[]}"#)
+        try canvas.update(fieldID: "1.video", fromText: "new.mp4")
+        let node = canvas.root["nodes"]?.arrayValue?.first
+        XCTAssertEqual(node?["widgets_values_named"]?["video"], .string("new.mp4"))
+        XCTAssertEqual(node?["widgets_values"]?["video"], .string("new.mp4"))
+        XCTAssertEqual(node?["widgets_values"]?["force_rate"], .integer(24))
+        XCTAssertEqual(node?["mode"], .integer(4))
+    }
     private func graph(_ json: String, order: [String: [String]] = [:]) throws -> WorkflowCanvas {
         try WorkflowCanvas(data: Data(json.utf8), widgetOrder: order)
     }

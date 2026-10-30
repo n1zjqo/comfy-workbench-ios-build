@@ -74,7 +74,8 @@ private struct SavedState: Codable {
         guard let selected = selected else { return [] }
         let fields = canvas?.fields ?? []
         if let items = selected.panelItems { return items.filter { item in fields.contains { $0.id == item.id } } }
-        return fields.filter { selected.pinned.contains($0.id) }.map { PanelFieldConfiguration(id: $0.id) }
+        // Older imports inferred `pinned`; only an explicitly saved panel is manual selection.
+        return []
     }
     var canvasJob: GenerationJob? {
         let matching = jobs.filter { $0.workflowID == selectedID && $0.workflowID != nil }
@@ -185,16 +186,7 @@ private struct SavedState: Codable {
                     item.randomSeedFields.formUnion(editable.filter { $0.nodeID == id && ["seed", "noise_seed"].contains($0.name) }.map(\.id))
                 }
             }
-            // Application display configuration is separate from node data.
-            item.pinned = Set(editable.filter { ["text", "prompt", "prompts", "seed", "steps", "cfg", "width", "height", "image", "video", "audio"].contains($0.name) }.map(\.id))
-            if !graph.originalLayout {
-                let api = try WorkflowDocument(data: data, objectInfo: info)
-                item.pinned = Set(api.applicationFields().map(\.id))
-            }
-            if item.pinned.isEmpty { item.pinned = Set(editable.map(\.id)) }
-            if graph.nodes.contains(where: { $0.type == "RayPromptQueue" }) {
-                item.pinned.formUnion(editable.filter { $0.nodeType == "RayPromptQueue" || $0.nodeType.hasPrefix("Primitive") }.map(\.id))
-            }
+            item.panelItems = []
             workflows.append(item); selectedID = item.id; try loadWorkflow(item)
             try persist(); activeTab = 1
             importStatus = "已导入：\(name)"
@@ -229,6 +221,34 @@ private struct SavedState: Codable {
         if enabled && !items.contains(where: { $0.id == field.id }) { items.append(PanelFieldConfiguration(id: field.id)) }
         if !enabled { items.removeAll { $0.id == field.id } }
         do { try configurePanel(items) } catch { self.error = error.localizedDescription }
+    }
+    func nodeIsInPanel(_ node: CanvasNode) -> Bool {
+        !node.fields.isEmpty && node.fields.allSatisfy { field in panelItems.contains { $0.id == field.id } }
+    }
+    func showNodeInPanel(_ nodeID: String, enabled: Bool) throws {
+        guard let node = canvas?.nodes.first(where: { $0.id == nodeID }), !node.fields.isEmpty else { throw WorkflowError.invalid("这个节点没有可直接编辑的参数。") }
+        let ids = Set(node.fields.map(\.id))
+        var items = panelItems
+        if enabled {
+            for field in node.fields where !items.contains(where: { $0.id == field.id }) {
+                var item = PanelFieldConfiguration(id: field.id); item.group = "\(node.type) #\(node.id)"; items.append(item)
+            }
+        } else { items.removeAll { ids.contains($0.id) } }
+        try configurePanel(items)
+    }
+    func setReferenceEnabled(_ field: WorkflowField, enabled: Bool) throws {
+        guard let graph = canvas, let before = graph.referenceMode(nodeID: field.nodeID),
+              let current = graph.fields.first(where: { $0.id == field.id }), current.schema.isUpload else { throw WorkflowError.invalid("这个素材没有可切换的节点状态。") }
+        if enabled && current.value.displayValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { throw WorkflowError.invalid("先选择并保存素材，再启用。") }
+        try commit(WorkflowChange(kind: .referenceMode, fieldID: field.nodeID, label: "素材启用状态", before: before, after: .integer(enabled ? 0 : 4)))
+    }
+    func editReference(_ field: WorkflowField, text: String, enabled: Bool) throws {
+        guard let graph = canvas, let mode = graph.referenceMode(nodeID: field.nodeID),
+              let current = graph.fields.first(where: { $0.id == field.id }), current.schema.isUpload else { try edit(field, text: text); return }
+        if enabled && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { throw WorkflowError.invalid("先选择素材，或关闭此参考。") }
+        let before: JSONValue = .object(["value": current.value, "mode": mode])
+        let after: JSONValue = .object(["value": try current.parsedValue(from: text), "mode": .integer(enabled ? 0 : 4)])
+        try commit(WorkflowChange(kind: .reference, fieldID: field.id, label: "参考素材", before: before, after: after))
     }
     func choosePrompt(_ id: String) {
         do { try commit(WorkflowChange(kind: .prompt, label: "提示词入口", before: selected?.promptField.map(JSONValue.string) ?? .null, after: id.isEmpty ? .null : .string(id))) }
@@ -268,6 +288,20 @@ private struct SavedState: Codable {
             item.pinned = Set(item.panelItems?.map(\.id) ?? [])
         case .prompt: item.promptField = value.stringValue
         case .randomSeeds: item.randomSeedFields = Set(value.arrayValue?.compactMap(\.stringValue) ?? [])
+        case .referenceMode:
+            guard let id = change.fieldID else { throw WorkflowError.invalid("编辑记录不完整。") }
+            let info = try objectInfoData.map { try ObjectInfo(data: $0) }
+            var graph = try WorkflowCanvas(data: item.data, objectInfo: info, widgetOrder: item.canvasWidgetOrder ?? [:])
+            try graph.setReferenceMode(nodeID: id, mode: value)
+            item.data = try graph.data(); item.canvasWidgetOrder = graph.widgetOrder
+        case .reference:
+            guard let id = change.fieldID, let inputValue = value["value"], let mode = value["mode"] else { throw WorkflowError.invalid("素材编辑记录不完整。") }
+            let info = try objectInfoData.map { try ObjectInfo(data: $0) }
+            var graph = try WorkflowCanvas(data: item.data, objectInfo: info, widgetOrder: item.canvasWidgetOrder ?? [:])
+            guard let field = graph.fields.first(where: { $0.id == id }) else { throw WorkflowError.invalid("找不到素材参数。") }
+            try graph.update(fieldID: id, value: inputValue)
+            try graph.setReferenceMode(nodeID: field.nodeID, mode: mode)
+            item.data = try graph.data(); item.canvasWidgetOrder = graph.widgetOrder
         }
         item.editedAt = Date()
         return item
@@ -539,6 +573,25 @@ private struct SavedState: Codable {
         referenceDownloads[digest] = task; lastReferenceDownload = task
         defer { referenceDownloads.removeValue(forKey: digest); if referenceDownloads.isEmpty { lastReferenceDownload = nil } }
         return try await task.value
+    }
+    func clearBackground() throws {
+        let old = background, oldDate = backgroundDate
+        backgroundRevision = UUID(); backgroundTask?.cancel(); backgroundTask = nil
+        background = nil; backgroundDate = Date()
+        do {
+            try persist()
+            let file = root.appendingPathComponent("background.jpg")
+            if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+        } catch { background = old; backgroundDate = oldDate; try? persist(); throw error }
+    }
+    func restoreLatestGeneratedBackground() async throws {
+        guard let job = jobs.last(where: { $0.finished && $0.state == "已完成" && $0.displayedOutputs.primary.contains(where: { ["png", "jpg", "jpeg", "webp", "heic"].contains(($0.filename as NSString).pathExtension.lowercased()) }) }),
+              let output = job.displayedOutputs.primary.first(where: { ["png", "jpg", "jpeg", "webp", "heic"].contains(($0.filename as NSString).pathExtension.lowercased()) }) else { throw WorkflowError.invalid("还没有可设为背景的生成图片。") }
+        backgroundRevision = UUID(); let revision = backgroundRevision
+        let local = try await localMedia(output, job: job)
+        guard let image = downsampledImage(local, maxPixelSize: 2400) else { throw WorkflowError.invalid("无法读取这张生成图片。") }
+        guard revision == backgroundRevision else { return }
+        setBackground(image)
     }
     func setBackground(_ image: UIImage, sourceDate: Date = Date()) {
         guard image.size.width > 0, image.size.height > 0 else { return }

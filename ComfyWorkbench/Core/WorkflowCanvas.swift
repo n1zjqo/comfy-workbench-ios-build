@@ -87,6 +87,22 @@ public struct WorkflowCanvas {
         return Data(try encode(root).utf8)
     }
     public var fields: [WorkflowField] { nodes.flatMap(\.fields) }
+    public func referenceMode(nodeID: String) -> JSONValue? {
+        guard originalLayout, nodes.first(where: { $0.id == nodeID })?.fields.contains(where: { $0.schema.isUpload }) == true,
+              let node = root["nodes"]?.arrayValue?.first(where: { $0["id"]?.displayValue == nodeID }) else { return nil }
+        return node["mode"] ?? .null
+    }
+    /// A deliberate media-loader mode change; never changes sockets, links or widget values.
+    public mutating func setReferenceMode(nodeID: String, mode: JSONValue) throws {
+        guard referenceMode(nodeID: nodeID) != nil,
+              mode == .null || [Int64(0), 2, 4].contains(mode.integerValue ?? -1),
+              var object = root.objectValue, var rawNodes = object["nodes"]?.arrayValue,
+              let index = rawNodes.firstIndex(where: { $0["id"]?.displayValue == nodeID }),
+              var raw = rawNodes[index].objectValue else { throw WorkflowError.invalid("只能切换普通工作流中已有素材节点的启用状态。") }
+        if mode == .null { raw.removeValue(forKey: "mode") } else { raw["mode"] = mode }
+        rawNodes[index] = .object(raw); object["nodes"] = .array(rawNodes)
+        root = .object(object); try loadUI()
+    }
     public func visibleNodeID(for executionID: String?) -> String? {
         guard let executionID = executionID else { return nil }
         if nodes.contains(where: { $0.id == executionID }) { return executionID }
@@ -119,6 +135,8 @@ public struct WorkflowCanvas {
                     throw WorkflowError.invalid("此节点的命名参数与位置参数无法可靠对应，请在 ComfyUI 中重新保存工作流后导入，或导入 API JSON。")
                 }
                 array[slot] = value; raw["widgets_values"] = .array(array)
+            } else if var mirror = raw["widgets_values"]?.objectValue, mirror[field.name] != nil {
+                mirror[field.name] = value; raw["widgets_values"] = .object(mirror)
             }
             named[field.name] = value; raw["widgets_values_named"] = .object(named)
         } else if var named = raw["widgets_values"]?.objectValue {

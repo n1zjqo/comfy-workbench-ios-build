@@ -94,6 +94,7 @@ public struct WorkflowReferenceInput: Identifiable {
     public let field: WorkflowField
     public let destinations: [String]
     public let role: String?
+    public let enabled: Bool
 }
 
 public struct WorkflowReferenceGroup: Identifiable {
@@ -125,7 +126,7 @@ extension WorkflowCanvas {
     public var referenceGroups: [WorkflowReferenceGroup] {
         let byID = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0) })
         let outgoing = Dictionary(grouping: links, by: \.source)
-        let inputs = nodes.filter { !$0.bypassed }.flatMap(\.fields).filter { $0.schema.isUpload }.map { field -> WorkflowReferenceInput in
+        let inputs = nodes.flatMap(\.fields).filter { $0.schema.isUpload }.map { field -> WorkflowReferenceInput in
             var destinations: [String] = [], roles = Set<String>(), visited = Set<String>(), pending = [field.nodeID]
             while let source = pending.popLast(), visited.count < 3000 {
                 guard visited.insert(source).inserted else { continue }
@@ -137,11 +138,18 @@ extension WorkflowCanvas {
                     switch input.lowercased() {
                     case "first_frame", "start_image": roles.insert("首帧")
                     case "last_frame", "end_image": roles.insert("尾帧")
-                    default: break
+                    default:
+                        if target.type == "MiniMaxH3ReferenceToVideo" {
+                            for (prefix, label) in [("ref_images.ref_image_", "参考图片"), ("ref_videos.ref_video_", "参考视频"), ("ref_audios.ref_audio_", "参考音频"), ("ref_video_audios.ref_video_audio_", "视频原声")] {
+                                if input.hasPrefix(prefix), let index = Int(input.dropFirst(prefix.count)), index >= 0, index < 100 {
+                                    roles.insert("\(label) \(index + 1)")
+                                }
+                            }
+                        }
                     }
                 }
             }
-            return WorkflowReferenceInput(field: field, destinations: Array(Set(destinations)).sorted(), role: roles.count == 1 && destinations.count == 1 ? roles.first : nil)
+            return WorkflowReferenceInput(field: field, destinations: Array(Set(destinations)).sorted(), role: roles.count == 1 && destinations.count == 1 ? roles.first : nil, enabled: byID[field.nodeID]?.bypassed != true)
         }
         return WorkflowFieldSchema.UploadKind.allCases.compactMap { kind in
             let matching = inputs.filter { ($0.field.schema.uploadKind ?? .file) == kind }

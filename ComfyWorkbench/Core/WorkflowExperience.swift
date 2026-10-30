@@ -91,7 +91,7 @@ public struct PanelFieldConfiguration: Codable, Identifiable, Equatable {
 }
 
 public struct WorkflowChange: Codable, Equatable {
-    public enum Kind: String, Codable { case parameter, panel, prompt, randomSeeds }
+    public enum Kind: String, Codable { case parameter, panel, prompt, randomSeeds, referenceMode, reference }
     public var kind: Kind
     public var fieldID: String?
     public var label: String

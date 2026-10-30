@@ -138,6 +138,42 @@ final class WorkflowCoreTests: XCTestCase {
     func testReferenceGroupsDoNotInventSlotsForUnconnectedH3Inputs() throws {
         let raw = #"{"nodes":[{"id":1,"type":"LoadImage","widgets_values":["disabled.png"],"mode":2},{"id":2,"type":"MiniMaxH3ImageToVideo","widgets_values":[],"inputs":[{"name":"first_frame","type":"IMAGE","link":null},{"name":"last_frame","type":"IMAGE","link":null}]}],"links":[]}"#
         let canvas = try WorkflowCanvas(data: bytes(raw))
-        XCTAssertTrue(canvas.referenceGroups.isEmpty)
+        XCTAssertEqual(canvas.referenceGroups.flatMap(\.inputs).map(\.id), ["1.image"])
+        XCTAssertFalse(try XCTUnwrap(canvas.referenceGroups.first?.inputs.first).enabled)
+        XCTAssertTrue(try XCTUnwrap(canvas.referenceGroups.first?.inputs.first).destinations.isEmpty)
+    }
+    func testDisabledH3ReferencesRemainEditableAndConvertOnlyWhenEnabled() throws {
+        let specs = (0..<6).map { ("LoadImage", "image", "ref_images.ref_image_\($0)", "IMAGE") }
+            + [("VHS_LoadVideo", "video", "ref_videos.ref_video_0", "IMAGE"), ("LoadAudio", "audio", "ref_audios.ref_audio_0", "AUDIO")]
+        var nodes: [[String: Any]] = [], links: [[Any]] = [], ports: [[String: Any]] = []
+        for (index, spec) in specs.enumerated() {
+            let id = index + 1
+            nodes.append(["id": id, "type": spec.0, "mode": index == 0 ? 0 : 4, "pos": [id * 20, id * 30],
+                          "widgets_values": [spec.1: "synthetic"], "inputs": [], "outputs": [["name": spec.3, "type": spec.3, "links": [id]]]])
+            links.append([id, id, 0, 9, index, spec.3])
+            ports.append(["name": spec.2, "type": spec.3, "link": id])
+        }
+        nodes.append(["id": 9, "type": "MiniMaxH3ReferenceToVideo", "inputs": ports, "outputs": [], "widgets_values": []])
+        let data = try JSONSerialization.data(withJSONObject: ["nodes": nodes, "links": links])
+        var canvas = try WorkflowCanvas(data: data)
+        XCTAssertEqual(canvas.referenceGroups.map { $0.inputs.count }, [6, 1, 1])
+        XCTAssertEqual(canvas.referenceGroups.flatMap(\.inputs).filter(\.enabled).count, 1)
+        XCTAssertEqual(canvas.referenceGroups[0].inputs.map(\.role), (1...6).map { "参考图片 \($0)" })
+        XCTAssertEqual(canvas.referenceGroups[1].inputs.first?.role, "参考视频 1")
+        let originalLinks = canvas.root["links"]
+        let metadata = #"{"LoadImage":{"input":{"required":{"image":["STRING",{"image_upload":true}]}}},"LoadAudio":{"input":{"required":{"audio":["STRING",{"audio_upload":true}]}}},"VHS_LoadVideo":{"input":{"required":{"video":["STRING"]}}},"MiniMaxH3ReferenceToVideo":{"output_node":true,"input":{"optional":{"ref_images":["COMFY_AUTOGROW_V3",{"template":{"input":{"required":{"ref_image":["IMAGE"]}},"prefix":"ref_image_","min":0,"max":9}}],"ref_videos":["COMFY_AUTOGROW_V3",{"template":{"input":{"required":{"ref_video":["IMAGE"]}},"prefix":"ref_video_","min":0,"max":3}}],"ref_audios":["COMFY_AUTOGROW_V3",{"template":{"input":{"required":{"ref_audio":["AUDIO"]}},"prefix":"ref_audio_","min":0,"max":3}}]}}}}"#
+        let before = try JSONValue(data: UIWorkflowConverter.convert(data: canvas.data(), objectInfoData: bytes(metadata)))
+        XCTAssertEqual(before["9"]?["inputs"]?.objectValue?.count, 1)
+        for id in 2...8 { try canvas.setReferenceMode(nodeID: String(id), mode: .integer(0)) }
+        try canvas.update(fieldID: "7.video", fromText: "replaced.mp4")
+        let after = try JSONValue(data: UIWorkflowConverter.convert(data: canvas.data(), objectInfoData: bytes(metadata)))
+        XCTAssertEqual(after["9"]?["inputs"]?.objectValue?.count, 8)
+        XCTAssertEqual(after["7"]?["inputs"]?["video"], .string("replaced.mp4"))
+        XCTAssertEqual(canvas.root["links"], originalLinks)
+        XCTAssertEqual(canvas.nodes.first?.x, 20)
+        XCTAssertThrowsError(try canvas.setReferenceMode(nodeID: "9", mode: .integer(4)))
+        XCTAssertThrowsError(try canvas.setReferenceMode(nodeID: "1", mode: .integer(99)))
+        try canvas.setReferenceMode(nodeID: "2", mode: .integer(2))
+        XCTAssertFalse(try XCTUnwrap(canvas.referenceGroups[0].inputs.first { $0.field.nodeID == "2" }).enabled)
     }
 }

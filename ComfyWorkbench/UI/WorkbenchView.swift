@@ -87,6 +87,12 @@ struct ChatView: View {
                         }
                         Spacer()
                         Button { toggleClean(true) } label: { Image(systemName: "viewfinder").frame(width: 44, height: 44).glass(16) }.accessibilityLabel("清屏")
+                            .accessibilityIdentifier("creation-fullscreen")
+                            .accessibilityHint("长按可恢复生成图或清除背景")
+                            .contextMenu {
+                                Button("恢复最新生成图背景") { Task { do { try await store.restoreLatestGeneratedBackground() } catch { store.error = error.localizedDescription } } }
+                                Button("清除聊天背景", role: .destructive) { do { try store.clearBackground() } catch { store.error = error.localizedDescription } }
+                            }
                     }.padding(.horizontal, 24).padding(.top, 18)
                     ScrollViewReader { proxy in
                         ScrollView {
