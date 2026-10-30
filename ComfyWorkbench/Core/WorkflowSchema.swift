@@ -2,6 +2,7 @@ import Foundation
 
 public struct WorkflowFieldSchema: Equatable {
     public enum Kind: String { case text, integer, decimal, boolean, choice }
+    public enum UploadKind: String, CaseIterable { case image, video, audio, file }
     public let kind: Kind
     public let minimumValue: JSONValue?
     public let maximumValue: JSONValue?
@@ -9,6 +10,7 @@ public struct WorkflowFieldSchema: Equatable {
     public let options: [JSONValue]
     public let multiline: Bool
     public let isUpload: Bool
+    public let uploadKind: UploadKind?
     public let connectionOnly: Bool
     public let acceptsLiteralArray: Bool
 
@@ -18,10 +20,11 @@ public struct WorkflowFieldSchema: Equatable {
 
     public init(kind: Kind, minimumValue: JSONValue? = nil, maximumValue: JSONValue? = nil,
                 step: Double? = nil, options: [JSONValue] = [], multiline: Bool = false,
-                isUpload: Bool = false, connectionOnly: Bool = false, acceptsLiteralArray: Bool = false) {
+                isUpload: Bool = false, connectionOnly: Bool = false, acceptsLiteralArray: Bool = false, uploadKind: UploadKind? = nil) {
         self.kind = kind; self.minimumValue = minimumValue; self.maximumValue = maximumValue
         self.step = step; self.options = options; self.multiline = multiline
         self.isUpload = isUpload; self.connectionOnly = connectionOnly; self.acceptsLiteralArray = acceptsLiteralArray
+        self.uploadKind = isUpload ? (uploadKind ?? .file) : nil
     }
 
     public static func inferred(name: String, value: JSONValue) -> WorkflowFieldSchema {
@@ -35,7 +38,7 @@ public struct WorkflowFieldSchema: Equatable {
         let lower = name.lowercased()
         return WorkflowFieldSchema(kind: kind,
             multiline: kind == .text && (lower.contains("prompt") || lower == "text" || value.displayValue.contains("\n") || value.displayValue.count > 160),
-            isUpload: kind == .text && ["image", "video", "audio"].contains(lower))
+            isUpload: kind == .text && ["image", "video", "audio"].contains(lower), uploadKind: UploadKind(rawValue: lower))
     }
 }
 
@@ -70,11 +73,79 @@ public struct ObjectInfo: Equatable {
         }
         let widgetTypes = ["STRING", "INT", "FLOAT", "NUMBER", "BOOLEAN", "BOOL", "COMBO", "COMFY_DYNAMICCOMBO_V3"]
         let arrayChoices = options.contains { $0.arrayValue != nil }
+        // VHS upload loaders omit the usual upload flag. Path loaders intentionally stay text fields.
+        let knownUpload: WorkflowFieldSchema.UploadKind? =
+            (["VHS_LoadVideo", "VHS_LoadVideoFFmpeg"].contains(classType) && name == "video") ? .video :
+            (classType == "VHS_LoadAudioUpload" && name == "audio" ? .audio : nil)
+        let uploadKind: WorkflowFieldSchema.UploadKind? = config["image_upload"]?.boolValue == true ? .image :
+            (config["video_upload"]?.boolValue == true ? .video : (config["audio_upload"]?.boolValue == true ? .audio : knownUpload))
         return WorkflowFieldSchema(kind: kind, minimumValue: config["min"], maximumValue: config["max"],
             step: config["step"]?.doubleValue, options: options,
             multiline: config["multiline"]?.boolValue ?? false,
-            isUpload: (config["image_upload"]?.boolValue ?? false) || (config["video_upload"]?.boolValue ?? false) || (config["audio_upload"]?.boolValue ?? false),
+            isUpload: uploadKind != nil,
             connectionOnly: (config["forceInput"]?.boolValue ?? false) || !widgetTypes.contains(typeName),
-            acceptsLiteralArray: arrayChoices)
+            acceptsLiteralArray: arrayChoices,
+            uploadKind: uploadKind)
+    }
+}
+
+public struct WorkflowReferenceInput: Identifiable {
+    public var id: String { field.id }
+    public let field: WorkflowField
+    public let destinations: [String]
+    public let role: String?
+}
+
+public struct WorkflowReferenceGroup: Identifiable {
+    public enum Layout: Equatable { case hero, grid, rows }
+    public var id: String { kind.rawValue }
+    public let kind: WorkflowFieldSchema.UploadKind
+    public let inputs: [WorkflowReferenceInput]
+    public var layout: Layout { kind == .image || kind == .video ? (inputs.count == 1 ? .hero : .grid) : .rows }
+    /// Preserve input order. Wide media use a full row; portrait/square media share a row.
+    public func mediaRows(aspectRatios: [String: Double]) -> [[WorkflowReferenceInput]] {
+        var rows: [[WorkflowReferenceInput]] = [], pair: [WorkflowReferenceInput] = []
+        for input in inputs {
+            let ratio = aspectRatios[input.id] ?? 1
+            if ratio.isFinite && ratio >= 1.25 {
+                if !pair.isEmpty { rows.append(pair); pair = [] }
+                rows.append([input])
+            } else {
+                pair.append(input)
+                if pair.count == 2 { rows.append(pair); pair = [] }
+            }
+        }
+        if !pair.isEmpty { rows.append(pair) }
+        return rows
+    }
+}
+
+extension WorkflowCanvas {
+    /// A view of existing upload inputs. Never creates nodes, sockets, or links.
+    public var referenceGroups: [WorkflowReferenceGroup] {
+        let byID = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0) })
+        let outgoing = Dictionary(grouping: links, by: \.source)
+        let inputs = nodes.filter { !$0.bypassed }.flatMap(\.fields).filter { $0.schema.isUpload }.map { field -> WorkflowReferenceInput in
+            var destinations: [String] = [], roles = Set<String>(), visited = Set<String>(), pending = [field.nodeID]
+            while let source = pending.popLast(), visited.count < 3000 {
+                guard visited.insert(source).inserted else { continue }
+                for link in outgoing[source] ?? [] {
+                    guard let target = byID[link.target], !target.bypassed, target.inputs.indices.contains(link.targetSlot) else { continue }
+                    if target.type == "Reroute" { pending.append(target.id); continue }
+                    let input = target.inputs[link.targetSlot]
+                    destinations.append("\(target.type) #\(target.id) / \(input)")
+                    switch input.lowercased() {
+                    case "first_frame", "start_image": roles.insert("首帧")
+                    case "last_frame", "end_image": roles.insert("尾帧")
+                    default: break
+                    }
+                }
+            }
+            return WorkflowReferenceInput(field: field, destinations: Array(Set(destinations)).sorted(), role: roles.count == 1 && destinations.count == 1 ? roles.first : nil)
+        }
+        return WorkflowFieldSchema.UploadKind.allCases.compactMap { kind in
+            let matching = inputs.filter { ($0.field.schema.uploadKind ?? .file) == kind }
+            return matching.isEmpty ? nil : WorkflowReferenceGroup(kind: kind, inputs: matching)
+        }
     }
 }

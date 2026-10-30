@@ -9,9 +9,9 @@ struct ComfyWorkbenchApp: App {
     var body: some Scene {
         WindowGroup {
             WorkbenchView().environmentObject(store).environmentObject(clipboard).environmentObject(strata).preferredColorScheme(.dark)
-                .onAppear { store.resumeMonitoring(); clipboard.resume(); strata.resume() }
+                .onAppear { store.resumeMonitoring(); clipboard.resume(); strata.resume(); Task { await store.refreshConnectionStatus(force: true) } }
                 .onChange(of: phase) { value in
-                    if value == .active { store.resumeMonitoring(); clipboard.resume(); strata.resume() }
+                    if value == .active { store.resumeMonitoring(); clipboard.resume(); strata.resume(); Task { await store.refreshConnectionStatus(force: true) } }
                     else if value == .background { store.pauseMonitoring(); store.saveDraftsNow(); clipboard.pause(); strata.background() }
                 }
         }

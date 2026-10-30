@@ -307,6 +307,32 @@ final class ComfyClientTests: XCTestCase {
         }
     }
 
+    func testSevenWorkflowOutputsShowTerminalImageAndPreserveAllExtras() throws {
+        let graph = Data(#"{"1":{"class_type":"Generate","inputs":{}},"2":{"class_type":"PreviewImage","inputs":{"images":["1",0]}},"3":{"class_type":"Refine","inputs":{"image":["1",0]}},"4":{"class_type":"SaveImage","inputs":{"images":["3",0]}},"5":{"class_type":"Upscale","inputs":{"image":["3",0]}},"6":{"class_type":"SaveImage","inputs":{"images":["5",0]}},"7":{"class_type":"Comparer","inputs":{"image_a":["1",0],"image_b":["3",0]}},"8":{"class_type":"Comparer","inputs":{"image_a":["3",0],"image_b":["5",0]}}}"#.utf8)
+        let outputs = [ComfyOutput(filename: "preview.png", type: "temp", nodeID: "2"), ComfyOutput(filename: "intermediate.png", nodeID: "4"), ComfyOutput(filename: "final.png", nodeID: "6"), ComfyOutput(filename: "compare-a.png", type: "temp", nodeID: "7"), ComfyOutput(filename: "compare-b.png", type: "temp", nodeID: "7"), ComfyOutput(filename: "compare-c.png", type: "temp", nodeID: "8"), ComfyOutput(filename: "compare-d.png", type: "temp", nodeID: "8")]
+        let selection = ComfyOutputSelection(outputs: outputs, promptData: graph)
+        XCTAssertEqual(selection.primary.map(\.filename), ["final.png"])
+        XCTAssertEqual(selection.other.count, 6)
+        XCTAssertEqual(Set(selection.primary + selection.other), Set(outputs))
+    }
+
+    func testOutputSelectionKeepsTrueBatchesIndependentBranchesAndUnknownGraphs() {
+        let graph = Data(#"{"1":{"class_type":"Generate","inputs":{}},"2":{"class_type":"OtherGenerate","inputs":{}},"3":{"class_type":"SaveImage","inputs":{"images":["1",0]}},"4":{"class_type":"SaveImage","inputs":{"images":["2",0]}}}"#.utf8)
+        let outputs = [ComfyOutput(filename: "batch-1.png", nodeID: "3"), ComfyOutput(filename: "batch-2.png", nodeID: "3"), ComfyOutput(filename: "other.png", nodeID: "4")]
+        for data in [graph, Data("{}".utf8), Data("invalid".utf8)] {
+            let selection = ComfyOutputSelection(outputs: outputs, promptData: data)
+            XCTAssertEqual(selection.primary, outputs); XCTAssertTrue(selection.other.isEmpty)
+        }
+    }
+
+    func testOutputSelectionDeduplicatesSameFileButKeepsDifferentFoldersAndTempFallback() {
+        let first = ComfyOutput(filename: "same.png", subfolder: "a", type: "temp", nodeID: "1")
+        let repeated = ComfyOutput(filename: "same.png", subfolder: "a", type: "temp", nodeID: "2")
+        let different = ComfyOutput(filename: "same.png", subfolder: "b", type: "temp", nodeID: "2")
+        let selection = ComfyOutputSelection(outputs: [first, repeated, different], promptData: Data())
+        XCTAssertEqual(selection.primary, [first, different]); XCTAssertTrue(selection.other.isEmpty)
+    }
+
     private func makeClient(ddnsto: Bool = false, _ handler: @escaping (URLRequest) throws -> ComfyMockResponse) -> ComfyClient {
         let host = UUID().uuidString.lowercased() + (ddnsto ? ".ddnsto.com" : ".test")
         hosts.append(host)

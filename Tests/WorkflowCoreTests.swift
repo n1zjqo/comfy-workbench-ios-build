@@ -101,4 +101,43 @@ final class WorkflowCoreTests: XCTestCase {
         let info = try ObjectInfo(data: bytes(#"{"Custom":{"input":{"required":{"method":["COMFY_DYNAMICCOMBO_V3",{"options":[{"key":"sol-attn","inputs":{}},{"key":"sdpa","inputs":{}}]}]}}}}"#))
         XCTAssertEqual(info.schema(for: "Custom", input: "method")?.options, [.string("sol-attn"), .string("sdpa")])
     }
+
+    func testUploadKindsFollowServerMetadataAndVHSUploadLoadersOnly() throws {
+        let metadata = #"{"LoadImage":{"input":{"required":{"image":[["old.png"],{"image_upload":true}]}}},"LoadVideo":{"input":{"required":{"file":[["old.mov"],{"video_upload":true}]}}},"LoadAudio":{"input":{"required":{"audio":[["old.wav"],{"audio_upload":true}]}}},"VHS_LoadVideo":{"input":{"required":{"video":[["old.mp4"]]}}},"VHS_LoadAudioUpload":{"input":{"required":{"audio":[["old.wav"]]}}},"VHS_LoadAudio":{"input":{"required":{"audio_file":["STRING"]}}},"VHS_LoadVideoPath":{"input":{"required":{"video":["STRING"]}}}}"#
+        let info = try ObjectInfo(data: bytes(metadata))
+        for (type, input, kind) in [("LoadImage", "image", WorkflowFieldSchema.UploadKind.image), ("LoadVideo", "file", .video), ("LoadAudio", "audio", .audio), ("VHS_LoadVideo", "video", .video), ("VHS_LoadAudioUpload", "audio", .audio)] {
+            XCTAssertEqual(info.schema(for: type, input: input)?.uploadKind, kind)
+        }
+        XCTAssertFalse(try XCTUnwrap(info.schema(for: "VHS_LoadVideoPath", input: "video")).isUpload)
+        XCTAssertFalse(try XCTUnwrap(info.schema(for: "VHS_LoadAudio", input: "audio_file")).isUpload)
+    }
+
+    func testReferenceGroupsAdaptToWorkflowAndPreserveInputBindings() throws {
+        let raw = #"{"1":{"class_type":"LoadImage","inputs":{"image":"first.png"}},"2":{"class_type":"LoadImage","inputs":{"image":"last.png"}},"3":{"class_type":"LoadAudio","inputs":{"audio":"voice.wav"}},"4":{"class_type":"VHS_LoadVideo","inputs":{"video":"motion.mp4"}},"5":{"class_type":"MiniMaxH3ImageToVideo","inputs":{"first_frame":["1",0],"last_frame":["2",0],"ref_audio":["3",0],"ref_video":["4",0]}}}"#
+        var canvas = try WorkflowCanvas(data: bytes(raw))
+        let groups = canvas.referenceGroups
+        XCTAssertEqual(groups.map(\.kind), [.image, .video, .audio])
+        XCTAssertEqual(groups.map { $0.inputs.count }, [2, 1, 1])
+        XCTAssertEqual(groups[0].inputs.map(\.role), ["首帧", "尾帧"])
+        XCTAssertEqual(groups[0].mediaRows(aspectRatios: ["1.image": 9.0/16, "2.image": 9.0/16]).map { $0.map(\.id) }, [["1.image", "2.image"]])
+        XCTAssertEqual(groups[0].mediaRows(aspectRatios: ["1.image": 16.0/9, "2.image": 9.0/16]).map { $0.map(\.id) }, [["1.image"], ["2.image"]])
+        let links = canvas.links
+        try canvas.update(fieldID: "1.image", fromText: "new.png")
+        try canvas.update(fieldID: "2.image", fromText: "")
+        XCTAssertEqual(canvas.links, links)
+        XCTAssertEqual(canvas.fields.first { $0.id == "3.audio" }?.value, .string("voice.wav"))
+        XCTAssertEqual(canvas.fields.first { $0.id == "4.video" }?.value, .string("motion.mp4"))
+        XCTAssertEqual(canvas.referenceGroups[0].inputs.map(\.id), ["1.image", "2.image"])
+        let single = try WorkflowCanvas(data: bytes(#"{"1":{"class_type":"LoadImage","inputs":{"image":""}}}"#))
+        XCTAssertEqual(single.referenceGroups.count, 1)
+        XCTAssertEqual(single.referenceGroups.first?.layout, .hero)
+        let textOnly = try WorkflowCanvas(data: bytes(#"{"1":{"class_type":"Text","inputs":{"text":"synthetic"}}}"#))
+        XCTAssertTrue(textOnly.referenceGroups.isEmpty)
+    }
+
+    func testReferenceGroupsDoNotInventSlotsForUnconnectedH3Inputs() throws {
+        let raw = #"{"nodes":[{"id":1,"type":"LoadImage","widgets_values":["disabled.png"],"mode":2},{"id":2,"type":"MiniMaxH3ImageToVideo","widgets_values":[],"inputs":[{"name":"first_frame","type":"IMAGE","link":null},{"name":"last_frame","type":"IMAGE","link":null}]}],"links":[]}"#
+        let canvas = try WorkflowCanvas(data: bytes(raw))
+        XCTAssertTrue(canvas.referenceGroups.isEmpty)
+    }
 }

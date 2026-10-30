@@ -119,6 +119,7 @@ struct PlacesConnectionPage: View {
                 Text("每个地点分别保存地址。同一局域网直连，离开后使用该地点的 HTTPS 入口。").font(.caption).foregroundColor(.secondary)
             }.padding(24)
         }
+        .task { await store.refreshConnectionStatus() }
         .sheet(isPresented: $settings) { StrataSettings() }
         .sheet(isPresented: $comfySettings) {
             NavigationView { ConnectionPage().navigationTitle("ComfyUI").navigationBarTitleDisplayMode(.inline).toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { comfySettings = false } } } }.navigationViewStyle(.stack)

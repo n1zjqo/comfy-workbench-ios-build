@@ -69,7 +69,6 @@ struct ChatView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var clean: Bool
     @State private var message = ""
-    @State private var photoPicker = false
     @State private var artworkZoomed = false
     @State private var expandedInput = false
     @GestureState private var drag: CGFloat = 0
@@ -87,7 +86,6 @@ struct ChatView: View {
                             Text(store.selected?.name ?? "选择一个工作流开始").font(.caption).foregroundColor(.white.opacity(0.7)).lineLimit(1)
                         }
                         Spacer()
-                        Button { photoPicker = true } label: { Image(systemName: "photo").frame(width: 44, height: 44).glass(16) }.accessibilityLabel("更换聊天底图")
                         Button { toggleClean(true) } label: { Image(systemName: "viewfinder").frame(width: 44, height: 44).glass(16) }.accessibilityLabel("清屏")
                     }.padding(.horizontal, 24).padding(.top, 18)
                     ScrollViewReader { proxy in
@@ -140,7 +138,7 @@ struct ChatView: View {
                     if !clean && value.translation.width > 85 { toggleClean(true) }
                     else if clean && value.translation.width < -65 { toggleClean(false) }
                 })
-        }.sheet(isPresented: $photoPicker) { PhotoPicker { store.setBackground($0) } }
+        }
         .sheet(isPresented: $expandedInput) { ExpandedComposer(title: "编辑提示词", text: $message) }
         .onAppear { message = store.selected?.chatDraft ?? "" }
         .onChange(of: store.selectedID) { _ in message = store.selected?.chatDraft ?? "" }
@@ -216,11 +214,12 @@ struct ConnectionPage: View {
                 }.padding(20).glass()
                 Divider()
                 Text("Comfy Workbench for iOS").font(.headline)
-                Text("0.6.3 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
+                Text("0.6.4 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
             }.padding(24)
         }.onAppear {
             if let config = store.server { address = config.baseURL; internet = config.publicURL ?? ""; username = config.username; key = config.passwordKey; password = (try? KeychainStore.password(for: key)) ?? "" }
         }
+        .task { await store.refreshConnectionStatus() }
         .sheet(item: Binding(get: { store.verificationInSettings ? store.verificationPage : nil }, set: { store.verificationPage = $0 }), onDismiss: { Task { await store.finishVerification() } }) { page in
             VerificationBrowser(url: page.url) { store.verificationPage = nil }
         }

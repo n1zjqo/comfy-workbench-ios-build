@@ -16,7 +16,7 @@ struct ApplicationPanel: View {
     @EnvironmentObject private var store: WorkbenchStore
     let edit: (WorkflowField) -> Void
     var body: some View {
-        let items = store.panelItems
+        let items = store.panelItems.filter { item in store.canvas?.fields.first(where: { $0.id == item.id })?.schema.isUpload != true }
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                 if let field = store.canvas?.fields.first(where: { $0.id == item.id }) {

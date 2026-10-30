@@ -82,6 +82,50 @@ public struct PromptSubmission: Sendable {
     public let nodeErrors: Data?
 }
 
+/// Presentation only: keep every output, but show downstream saved results first.
+public struct ComfyOutputSelection {
+    public let primary: [ComfyOutput]
+    public let other: [ComfyOutput]
+    public init(outputs: [ComfyOutput], promptData: Data) {
+        var seen = Set<[String]>()
+        let unique = outputs.filter { seen.insert([$0.type, $0.subfolder, $0.filename]).inserted }
+        let saved = unique.filter { $0.type == "output" }
+        let candidates = saved.isEmpty ? unique : saved
+        let graph = (try? JSONSerialization.jsonObject(with: promptData)) as? [String: [String: Any]] ?? [:]
+        func links(_ node: String) -> [String: String] {
+            let inputs = graph[node]?["inputs"] as? [String: Any] ?? [:]
+            return inputs.reduce(into: [:]) { result, pair in
+                if let tuple = pair.value as? [Any], tuple.count == 2, let id = tuple[0] as? String,
+                   tuple[1] is NSNumber, graph[id] != nil { result[pair.key] = id }
+            }
+        }
+        func sources(_ output: ComfyOutput) -> Set<String> {
+            guard let node = output.nodeID else { return [] }
+            return Set(links(node).filter { ["image", "images", "video", "audio", "frames", "gifs"].contains($0.key) }.values)
+        }
+        func ancestors(_ roots: Set<String>) -> Set<String> {
+            var found = Set<String>(), pending = Array(roots)
+            while let next = pending.popLast(), found.count < 10_000 {
+                if found.insert(next).inserted { pending.append(contentsOf: links(next).values) }
+            }
+            return found
+        }
+        var media: [String: Set<String>] = [:], upstream: [String: Set<String>] = [:]
+        for output in candidates { let roots = sources(output); media[output.id] = roots; upstream[output.id] = ancestors(roots) }
+        let finals = candidates.filter { earlier in
+            let roots = media[earlier.id] ?? []
+            guard !roots.isEmpty else { return true }
+            return !candidates.contains { later in
+                let laterRoots = media[later.id] ?? []
+                return earlier.nodeID != later.nodeID && !laterRoots.isEmpty && roots.isDisjoint(with: laterRoots)
+                    && roots.isSubset(of: upstream[later.id] ?? []) && !laterRoots.isSubset(of: upstream[earlier.id] ?? [])
+            }
+        }
+        primary = finals.isEmpty ? candidates : finals
+        let ids = Set(primary.map(\.id)); other = unique.filter { !ids.contains($0.id) }
+    }
+}
+
 public struct ComfyHistoryResult: Sendable {
     public let promptID: String
     public let completed: Bool

@@ -39,13 +39,27 @@ struct OutputStrip: View {
     let job: GenerationJob
     @State private var selection: MediaSelection?
     var body: some View {
+        let displayed = job.displayedOutputs
+        VStack(alignment: .leading, spacing: 12) {
+            if displayed.primary.count == 1, let output = displayed.primary.first {
+                Button { selection = MediaSelection(output: output, job: job) } label: {
+                    OutputThumbnail(output: output, job: job, prominent: true)
+                }.buttonStyle(.plain)
+            } else { row(displayed.primary) }
+            if !displayed.other.isEmpty {
+                DisclosureGroup("中间预览与其他输出（\(displayed.other.count)）") { row(displayed.other).padding(.top, 10) }
+                    .font(.caption).foregroundColor(.secondary)
+            }
+        }.fullScreenCover(item: $selection) { MediaDetail(output: $0.output, job: $0.job) }
+    }
+    private func row(_ outputs: [ComfyOutput]) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 10) {
-                ForEach(job.outputs) { output in
+                ForEach(outputs) { output in
                     Button { selection = MediaSelection(output: output, job: job) } label: { OutputThumbnail(output: output, job: job) }.buttonStyle(.plain)
                 }
             }
-        }.fullScreenCover(item: $selection) { MediaDetail(output: $0.output, job: $0.job) }
+        }
     }
 }
 
@@ -57,6 +71,7 @@ struct OutputThumbnail: View {
     @EnvironmentObject var store: WorkbenchStore
     let output: ComfyOutput
     let job: GenerationJob
+    var prominent = false
     @State private var image: UIImage?
     @State private var failed = false
     var body: some View {
@@ -64,7 +79,8 @@ struct OutputThumbnail: View {
             Palette.ink
             if let image = image { Image(uiImage: image).resizable().scaledToFill() }
             else { VStack(spacing: 8) { Image(systemName: isVideo(output) ? "play.circle" : (failed ? "arrow.clockwise" : "photo")).font(.title); Text(output.filename).font(.caption2).lineLimit(2).padding(.horizontal, 8) } }
-        }.frame(width: 132, height: 164).clipShape(RoundedRectangle(cornerRadius: 16))
+        }.frame(width: prominent ? nil : 132, height: prominent ? 280 : 164)
+            .frame(maxWidth: prominent ? .infinity : nil).clipped().clipShape(RoundedRectangle(cornerRadius: 16))
             .accessibilityLabel("查看 \(output.filename)")
             .task(id: output.id) {
                 guard !isVideo(output) else { return }

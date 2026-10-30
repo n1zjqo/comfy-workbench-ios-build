@@ -6,6 +6,94 @@ import WebKit
 @testable import ComfyWorkbench
 
 final class NativeExperienceTests: XCTestCase {
+    @MainActor func testComfyConnectionProbeIsLightweightQuietAndReusesClient() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { NativeComfyProtocol.reset(); try? FileManager.default.removeItem(at: folder) }
+        var creations = 0
+        let store = WorkbenchStore(storageURL: folder, clientFactory: { config in
+            creations += 1; return NativeComfyProtocol.client(config)
+        })
+        store.server = ServerConfig(baseURL: "https://example.com")
+        await store.refreshConnectionStatus(force: true)
+        XCTAssertEqual(store.connectionStatus, "已连接")
+        var publications = 0
+        let observation = store.objectWillChange.sink { publications += 1 }; defer { observation.cancel() }
+        await store.refreshConnectionStatus(force: true)
+        await store.refreshConnectionStatus() // Recent success needs no extra request.
+        XCTAssertEqual(creations, 1); XCTAssertEqual(publications, 0)
+        XCTAssertEqual(NativeComfyProtocol.paths, ["/system_stats", "/system_stats"])
+    }
+
+    @MainActor func testCompletedGenerationUpdatesConnectionAndRejectsOldProbeFailure() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { NativeComfyProtocol.reset(); try? FileManager.default.removeItem(at: folder) }
+        let store = WorkbenchStore(storageURL: folder, clientFactory: NativeComfyProtocol.client)
+        let config = ServerConfig(baseURL: "https://example.com"); store.server = config
+        NativeComfyProtocol.holdStats = true
+        let check = Task { await store.refreshConnectionStatus(force: true) }
+        for _ in 0..<100 {
+            if NativeComfyProtocol.hasPending { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(NativeComfyProtocol.hasPending)
+        var job = GenerationJob(name: "Synthetic", message: "Synthetic", promptData: Data("{}".utf8), server: config)
+        job.promptID = "synthetic-job"; store.jobs = [job]
+        await store.poll()
+        XCTAssertTrue(store.jobs[0].finished); XCTAssertEqual(store.connectionStatus, "已连接")
+        NativeComfyProtocol.failOldProbe()
+        await check.value
+        XCTAssertEqual(store.connectionStatus, "已连接")
+        XCTAssertFalse(NativeComfyProtocol.paths.contains("/object_info"))
+        _ = store.noteVerification(ComfyAPIError(message: "old server", requiresBrowserVerification: true), config: ServerConfig(baseURL: "https://old.example.com"))
+        XCTAssertEqual(store.connectionStatus, "已连接"); XCTAssertNil(store.verificationRequired)
+    }
+
+    @MainActor func testPhotoUploadIsDraftOnlyAndClearingOneReferenceCanBeUndone() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { NativeComfyProtocol.reset(); try? FileManager.default.removeItem(at: folder) }
+        let store = WorkbenchStore(storageURL: folder, clientFactory: NativeComfyProtocol.client)
+        store.server = ServerConfig(baseURL: "https://example.com")
+        let workflow = SavedWorkflow(name: "Two references", data: Data(#"{"1":{"class_type":"LoadImage","inputs":{"image":"first.png"}},"2":{"class_type":"LoadImage","inputs":{"image":"second.png"}}}"#.utf8))
+        store.workflows = [workflow]; store.select(workflow.id)
+        let background = testImage(); store.background = background
+        let before = store.selected?.data
+        let filename = try await store.uploadReference(image: background)
+        XCTAssertEqual(filename, "references/uploaded.png")
+        XCTAssertEqual(store.selected?.data, before); XCTAssertTrue(store.background === background); XCTAssertTrue(store.jobs.isEmpty)
+        let first = try XCTUnwrap(store.canvas?.fields.first { $0.id == "1.image" })
+        try store.edit(first, text: filename)
+        try store.edit(first, text: "")
+        XCTAssertEqual(store.canvas?.fields.first { $0.id == "1.image" }?.value, .string(""))
+        XCTAssertEqual(store.canvas?.fields.first { $0.id == "2.image" }?.value, .string("second.png"))
+        store.undoEdit()
+        XCTAssertEqual(store.canvas?.fields.first { $0.id == "1.image" }?.value, .string(filename))
+        XCTAssertEqual(NativeComfyProtocol.paths, ["/upload/image"])
+    }
+
+    @MainActor func testReferenceCardsRenderPortraitLandscapeAndMixedInputs() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { NativeComfyProtocol.reset(); try? FileManager.default.removeItem(at: folder) }
+        let portrait = UIGraphicsImageRenderer(size: CGSize(width: 90, height: 160)).image { context in
+            UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 90, height: 160))
+        }
+        NativeComfyProtocol.previewData = portrait.pngData()!
+        let store = WorkbenchStore(storageURL: folder, clientFactory: NativeComfyProtocol.client)
+        store.server = ServerConfig(baseURL: "https://example.com")
+        let workflow = SavedWorkflow(name: "Mixed references", data: Data(#"{"1":{"class_type":"LoadImage","inputs":{"image":"portrait.png"}},"2":{"class_type":"LoadImage","inputs":{"image":""}},"3":{"class_type":"LoadAudio","inputs":{"audio":""}},"4":{"class_type":"VHS_LoadVideo","inputs":{"video":""}},"5":{"class_type":"MiniMaxH3ImageToVideo","inputs":{"first_frame":["1",0],"last_frame":["2",0]}}}"#.utf8))
+        store.workflows = [workflow]; store.select(workflow.id)
+        let window = try host(ScrollView { ReferenceMaterialSection { _ in }.padding(20) }.background(Palette.workspace).environmentObject(store).preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        window.layoutIfNeeded()
+        XCTAssertEqual(store.canvas?.referenceGroups.map(\.kind), [.image, .video, .audio])
+        XCTAssertEqual(store.canvas?.referenceGroups.first?.inputs.first?.role, "首帧")
+        XCTAssertTrue(store.jobs.isEmpty)
+        try capturePreview(window, name: "reference-materials-portrait-mixed")
+        let preview = try host(ReferenceMaterialPreview(field: try XCTUnwrap(store.canvas?.fields.first), value: "", knownRatio: 16.0/9).padding(20).environmentObject(store).preferredColorScheme(.dark))
+        defer { preview.isHidden = true }
+        try capturePreview(preview, name: "reference-materials-landscape")
+    }
+
     @MainActor func testReleaseResultCannotBeOverwrittenByAnOlderStatusPoll() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -403,6 +491,50 @@ final class NativeExperienceTests: XCTestCase {
         }
         return { x, y in let index = (y * width + x) * 4; return (bytes[index], bytes[index + 1], bytes[index + 2], bytes[index + 3]) }
     }
+}
+
+private final class NativeComfyProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var pending: NativeComfyProtocol?
+    private static var recorded: [String] = []
+    static var holdStats = false
+    static var previewData = Data()
+    static var paths: [String] { lock.lock(); defer { lock.unlock() }; return recorded }
+    static var hasPending: Bool { lock.lock(); defer { lock.unlock() }; return pending != nil }
+    static func client(_ config: ServerConfig) -> ComfyClient {
+        let session = URLSessionConfiguration.ephemeral; session.protocolClasses = [NativeComfyProtocol.self]
+        return ComfyClient(config: config, sessionConfiguration: session)
+    }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let path = request.url!.path
+        Self.lock.lock(); Self.recorded.append(path); Self.lock.unlock()
+        if path == "/system_stats", Self.holdStats {
+            Self.lock.lock(); Self.pending = self; Self.lock.unlock(); return
+        }
+        switch path {
+        case "/system_stats": reply(Data(#"{"system":{},"devices":[]}"#.utf8))
+        case "/object_info": reply(Data("{}".utf8))
+        case "/history/synthetic-job": reply(Data(#"{"synthetic-job":{"outputs":{},"status":{"completed":true,"status_str":"success","messages":[]}}}"#.utf8))
+        case "/upload/image":
+            XCTAssertEqual(request.httpMethod, "POST")
+            reply(Data(#"{"name":"uploaded.png","subfolder":"references","type":"input"}"#.utf8))
+        case "/view": reply(Self.previewData, type: "image/png")
+        default: XCTFail("Unexpected synthetic request: \(path)"); client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+        }
+    }
+    override func stopLoading() {}
+    private func reply(_ body: Data, type: String = "application/json") {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": type])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body); client?.urlProtocolDidFinishLoading(self)
+    }
+    static func failOldProbe() {
+        lock.lock(); let old = pending; pending = nil; lock.unlock()
+        if let old = old { old.client?.urlProtocol(old, didFailWithError: URLError(.timedOut)) }
+    }
+    static func reset() { failOldProbe(); lock.lock(); recorded = []; lock.unlock(); holdStats = false; previewData = Data() }
 }
 
 private final class RefreshLayoutState: ObservableObject { @Published var refreshing = false }

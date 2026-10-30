@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import SwiftUI
 import CryptoKit
+import UniformTypeIdentifiers
 
 struct GenerationJob: Codable, Identifiable {
     var id = UUID()
@@ -19,6 +20,7 @@ struct GenerationJob: Codable, Identifiable {
     var detail: String?
     var workflowID: UUID?
     var execution: ExecutionTrace?
+    var displayedOutputs: ComfyOutputSelection { ComfyOutputSelection(outputs: outputs, promptData: promptData) }
 }
 
 private struct SavedState: Codable {
@@ -59,6 +61,13 @@ private struct SavedState: Codable {
     private var backgroundDate: Date?
     private var backgroundRevision = UUID()
     private var bufferedEvents: [ComfyEvent] = []
+    private var clients: [(ServerConfig, ComfyClient)] = []
+    private let clientFactory: ((ServerConfig) throws -> ComfyClient)?
+    private var checkingConnection = false
+    private var connectionRevision = 0
+    private var lastConnectionSuccess = Date.distantPast
+    private var referenceDownloads: [String: Task<URL, Error>] = [:]
+    private var lastReferenceDownload: Task<URL, Error>?
     private let root: URL
     var selected: SavedWorkflow? { workflows.first { $0.id == selectedID } }
     var panelItems: [PanelFieldConfiguration] {
@@ -79,13 +88,15 @@ private struct SavedState: Codable {
         return document.fields.first { $0.name == "prompts" && $0.schema.kind == .text }
             ?? document.fields.first { ["prompt", "text", "positive"].contains($0.name) && $0.schema.kind == .text && !$0.nodeType.lowercased().contains("show") }
     }
-    init(storageURL: URL? = nil) {
+    init(storageURL: URL? = nil, clientFactory: ((ServerConfig) throws -> ComfyClient)? = nil) {
+        self.clientFactory = clientFactory
         root = storageURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ComfyWorkbench", isDirectory: true)
         do {
             let data = try Data(contentsOf: root.appendingPathComponent("state.json"))
             let state = try JSONDecoder().decode(SavedState.self, from: data)
             workflows = state.workflows; selectedID = state.selectedID; server = state.server
             jobs = state.jobs; clientID = state.clientID
+            if server != nil { connectionStatus = "等待检查连接" }
             backgroundDate = state.backgroundDate
             for index in jobs.indices where !jobs[index].finished { jobs[index].execution?.disconnect() }
             if let item = selected { try loadWorkflow(item) }
@@ -146,6 +157,7 @@ private struct SavedState: Codable {
             guard server == config else { throw WorkflowError.invalid("连接已改变，请重新打开服务器工作流列表。") }
             guard (workflow.size ?? 0) <= 12_000_000 else { throw WorkflowError.invalid("工作流超过 12 MB。") }
             let data = try await makeClient(config).serverWorkflow(path: workflow.path, userID: userID)
+            noteConnected(config)
             try await finishImport(data: data, name: (workflow.name as NSString).deletingPathExtension)
             return true
         } catch {
@@ -203,8 +215,9 @@ private struct SavedState: Codable {
         busy = true; defer { busy = false }
         do {
             objectInfoData = try await makeClient(config).objectInfo()
+            noteConnected(config)
             if let item = selected { try loadWorkflow(item) }
-        } catch { canvasRunIssue = error.localizedDescription; _ = noteVerification(error, config: config) }
+        } catch { canvasRunIssue = error.localizedDescription; noteConnectionFailure(error, config: config) }
     }
     func edit(_ field: WorkflowField, text: String) throws {
         guard let current = canvas?.fields.first(where: { $0.id == field.id }) else { throw WorkflowError.invalid("找不到这个参数。") }
@@ -306,7 +319,10 @@ private struct SavedState: Codable {
         do { try persist() } catch { self.error = "草稿保存失败：\(error.localizedDescription)" }
     }
     func connect(config: ServerConfig, password: String) async {
+        guard !busy else { return }
+        connectionRevision += 1
         busy = true; defer { busy = false }
+        var reachedServer = false
         do {
             var config = config
             _ = try config.validatedBaseURL()
@@ -314,25 +330,30 @@ private struct SavedState: Codable {
             if let id = try await probe.pairRoutes() { config.serviceID = id }
             let client = ComfyClient(config: config, password: password)
             _ = try await client.systemStats()
+            reachedServer = true; connectionStatus = "已连接，正在读取节点定义…"
             let metadata = try await client.objectInfo()
             _ = try ObjectInfo(data: metadata)
             try KeychainStore.savePassword(password, for: config.passwordKey)
             if server != config { bufferedEvents = [] }
             server = config; objectInfoData = metadata
+            clients = [(config, client)]
             if let item = selected { try loadWorkflow(item) }
-            connectionStatus = "已连接"
+            noteConnected(config)
             if verificationRequired?.baseURL == config.baseURL { verificationRequired = nil }
             failedConnection = nil
             try persist(); resumeMonitoring()
         } catch {
-            connectionStatus = "连接失败"
-            if noteVerification(error, config: config) { failedConnection = (config, password) }
+            connectionStatus = reachedServer ? "服务器可达，节点定义未能读取" : "连接失败"
+            if noteVerification(error, config: config, asConnectionAttempt: true) { failedConnection = (config, password) }
             else { self.error = error.localizedDescription }
         }
     }
     @discardableResult
-    func noteVerification(_ error: Error, config: ServerConfig) -> Bool {
+    func noteVerification(_ error: Error, config: ServerConfig, asConnectionAttempt: Bool = false) -> Bool {
         guard (error as? ComfyAPIError)?.requiresBrowserVerification == true else { return false }
+        // A historical job on a different server must not replace the selected connection's state.
+        guard asConnectionAttempt || server == nil || server == config else { return true }
+        connectionRevision += 1; lastConnectionSuccess = .distantPast
         verificationRequired = config
         connectionStatus = "需要网页验证"
         return true
@@ -364,7 +385,39 @@ private struct SavedState: Codable {
     }
 
     func makeClient(_ config: ServerConfig) throws -> ComfyClient {
-        ComfyClient(config: config, password: try KeychainStore.password(for: config.passwordKey))
+        if let cached = clients.first(where: { $0.0 == config }) { return cached.1 }
+        let client: ComfyClient
+        if let factory = clientFactory { client = try factory(config) }
+        else { client = ComfyClient(config: config, password: try KeychainStore.password(for: config.passwordKey)) }
+        clients.append((config, client)); if clients.count > 8 { clients.removeFirst() }
+        return client
+    }
+    func noteConnected(_ config: ServerConfig) {
+        guard server == config else { return }
+        connectionRevision += 1; lastConnectionSuccess = Date()
+        if connectionStatus != "已连接" { connectionStatus = "已连接" }
+        if verificationRequired == config { verificationRequired = nil }
+    }
+    private func noteConnectionFailure(_ failure: Error, config: ServerConfig, isProbe: Bool = false) {
+        guard server == config, !(failure is CancellationError), (failure as? URLError)?.code != .cancelled else { return }
+        if noteVerification(failure, config: config) { return }
+        if isProbe || failure is URLError || ((failure as? ComfyAPIError)?.statusCode ?? 0) >= 500 {
+            connectionRevision += 1; connectionStatus = "连接暂不可用"; lastConnectionSuccess = .distantPast
+        }
+    }
+    func refreshConnectionStatus(force: Bool = false) async {
+        guard let config = server, !checkingConnection, !busy, verificationPage == nil else { return }
+        guard force || Date().timeIntervalSince(lastConnectionSuccess) >= 20 else { return }
+        checkingConnection = true; defer { checkingConnection = false }
+        let revision = connectionRevision
+        do {
+            _ = try await makeClient(config).systemStats()
+            guard revision == connectionRevision, !Task.isCancelled else { return }
+            noteConnected(config)
+        } catch {
+            guard revision == connectionRevision, !Task.isCancelled else { return }
+            noteConnectionFailure(error, config: config, isProbe: true)
+        }
     }
     func submit(message: String? = nil) async {
         guard !busy else { return }
@@ -395,12 +448,14 @@ private struct SavedState: Codable {
             let extra = try JSONSerialization.data(withJSONObject: ["ios_request_id": job.id.uuidString])
             submissionAttempted = true
             let response = try await client.submit(prompt: data, clientID: clientID, extraData: extra)
+            noteConnected(config)
             if let index = jobs.firstIndex(where: { $0.id == job.id }) {
                 jobs[index].promptID = response.promptID; jobs[index].state = "排队中"; try persist()
                 replayBufferedEvents(promptID: response.promptID, config: config)
             }
             activeTab = 0; resumeMonitoring()
         } catch {
+            noteConnectionFailure(error, config: config)
             if let id = jobID, let index = jobs.firstIndex(where: { $0.id == id }) {
                 let rejected = (error as? ComfyAPIError)?.statusCode.map { (400..<500).contains($0) } ?? false
                 if !submissionAttempted {
@@ -420,19 +475,70 @@ private struct SavedState: Codable {
             if !noteVerification(error, config: config) { self.error = error.localizedDescription }
         }
     }
-    func upload(url: URL, field: WorkflowField) async {
-        guard let config = server else { error = "请先连接 ComfyUI。"; return }
-        busy = true; defer { busy = false }
+    func uploadReference(url: URL) async throws -> String {
         let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
+        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size > 0, size <= 150_000_000 else { throw WorkflowError.invalid("素材为空或超过 150 MB，请先压缩后重试。") }
+        let data = try await Task.detached(priority: .userInitiated) { try Data(contentsOf: url) }.value
+        let ext = url.pathExtension.lowercased()
+        let mime = UTType(filenameExtension: ext)?.preferredMIMEType ?? "application/octet-stream"
+        return try await uploadReference(data: data, extension: ext.isEmpty ? "bin" : ext, mime: mime)
+    }
+    func uploadReference(image: UIImage) async throws -> String {
+        guard image.size.width * image.size.height * image.scale * image.scale <= 40_000_000 else { throw WorkflowError.invalid("图片超过 4000 万像素，请先缩小后上传。") }
+        let upright: UIImage
+        if image.imageOrientation == .up { upright = image }
+        else {
+            let format = UIGraphicsImageRendererFormat(); format.scale = image.scale
+            upright = UIGraphicsImageRenderer(size: image.size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: image.size)) }
+        }
+        guard let data = upright.pngData() else { throw WorkflowError.invalid("无法读取这张图片，请换一张重试。") }
+        return try await uploadReference(data: data, extension: "png", mime: "image/png")
+    }
+    private func uploadReference(data: Data, extension ext: String, mime: String) async throws -> String {
+        guard !busy else { throw WorkflowError.invalid("请等待当前操作完成。") }
+        guard let config = server else { throw WorkflowError.invalid("请先设置 ComfyUI 连接。") }
+        guard !data.isEmpty, data.count <= 150_000_000 else { throw WorkflowError.invalid("素材为空或超过 150 MB。") }
+        busy = true; defer { busy = false }
         do {
-            let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            guard size <= 150_000_000 else { throw WorkflowError.invalid("素材超过 150 MB，请先压缩。") }
-            let client = try makeClient(config)
-            let data = try Data(contentsOf: url)
-            let filename = UUID().uuidString + "." + url.pathExtension
-            let output = try await client.uploadImage(data: data, filename: filename, mimeType: "application/octet-stream")
-            try edit(field, text: output.workflowInputPath)
-        } catch { self.error = error.localizedDescription }
+            let output = try await makeClient(config).uploadImage(data: data, filename: UUID().uuidString + "." + ext, mimeType: mime)
+            noteConnected(config)
+            guard server == config else { throw WorkflowError.invalid("连接已改变，请重新选择素材。") }
+            return output.workflowInputPath
+        } catch { noteConnectionFailure(error, config: config); throw error }
+    }
+    func referenceMediaURL(_ value: String) async throws -> URL {
+        guard let config = server else { throw WorkflowError.invalid("请先设置 ComfyUI 连接。") }
+        var name = value.trimmingCharacters(in: .whitespacesAndNewlines), type = "input"
+        for candidate in ["input", "output", "temp"] where name.hasSuffix(" [\(candidate)]") {
+            name = String(name.dropLast(candidate.count + 3)); type = candidate; break
+        }
+        name = name.replacingOccurrences(of: "\\", with: "/")
+        let components = name.split(separator: "/", omittingEmptySubsequences: false)
+        guard !components.isEmpty, components.allSatisfy({ !$0.isEmpty && $0 != ".." && $0 != "." }) else { throw WorkflowError.invalid("素材文件名无效。") }
+        let filename = String(components.last!)
+        let output = ComfyOutput(filename: filename, subfolder: components.dropLast().joined(separator: "/"), type: type)
+        let digest = SHA256.hash(data: Data((config.baseURL + "|" + (config.serviceID ?? "") + "|" + output.id).utf8)).map { String(format: "%02x", $0) }.joined()
+        let folder = root.appendingPathComponent("references", isDirectory: true)
+        let ext = String((filename as NSString).pathExtension.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.prefix(12).map(Character.init))
+        let file = folder.appendingPathComponent(digest + (ext.isEmpty ? "" : "." + ext))
+        if FileManager.default.fileExists(atPath: file.path) { return file }
+        if let pending = referenceDownloads[digest] { return try await pending.value }
+        // A mixed video workflow must not download several large clips into memory at once.
+        let previous = lastReferenceDownload
+        let task = Task { @MainActor () async throws -> URL in
+            _ = try? await previous?.value
+            do {
+                let data = try await makeClient(config).imageData(for: output)
+                noteConnected(config)
+                guard data.count <= 150_000_000 else { throw WorkflowError.invalid("素材过大，无法在手机预览。") }
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try data.write(to: file, options: .atomic); return file
+            } catch { noteConnectionFailure(error, config: config); throw error }
+        }
+        referenceDownloads[digest] = task; lastReferenceDownload = task
+        defer { referenceDownloads.removeValue(forKey: digest); if referenceDownloads.isEmpty { lastReferenceDownload = nil } }
+        return try await task.value
     }
     func setBackground(_ image: UIImage, sourceDate: Date = Date()) {
         guard image.size.width > 0, image.size.height > 0 else { return }
@@ -451,8 +557,8 @@ private struct SavedState: Codable {
     }
     private func updateGeneratedBackground() {
         guard backgroundTask == nil,
-              let job = jobs.last(where: { $0.finished && $0.state == "已完成" && $0.date > (backgroundDate ?? .distantPast) && $0.outputs.contains(where: { ["png", "jpg", "jpeg", "webp", "heic"].contains(($0.filename as NSString).pathExtension.lowercased()) }) }),
-              let output = job.outputs.first(where: { ["png", "jpg", "jpeg", "webp", "heic"].contains(($0.filename as NSString).pathExtension.lowercased()) }) else { return }
+              let job = jobs.last(where: { $0.finished && $0.state == "已完成" && $0.date > (backgroundDate ?? .distantPast) && $0.displayedOutputs.primary.contains(where: { ["png", "jpg", "jpeg", "webp", "heic"].contains(($0.filename as NSString).pathExtension.lowercased()) }) }),
+              let output = job.displayedOutputs.primary.first(where: { ["png", "jpg", "jpeg", "webp", "heic"].contains(($0.filename as NSString).pathExtension.lowercased()) }) else { return }
         let revision = backgroundRevision
         backgroundTask = Task { [weak self] in
             guard let self = self else { return }
@@ -496,6 +602,7 @@ private struct SavedState: Codable {
                 do {
                     for try await event in await client.events(clientID: eventsClientID) {
                         guard !Task.isCancelled else { return }
+                        self?.noteConnected(config)
                         self?.receive(event, config: config)
                     }
                 } catch {
@@ -543,6 +650,7 @@ private struct SavedState: Codable {
                 }
                 if let history = try await client.history(promptID: prompt) {
                     try Task.checkCancellation()
+                    noteConnected(job.server)
                     guard let index = jobs.firstIndex(where: { $0.id == job.id && !$0.finished }) else { continue }
                     jobs[index].outputs = history.outputs; jobs[index].text = history.textOutputs
                     jobs[index].finished = history.completed || history.failed
@@ -567,6 +675,7 @@ private struct SavedState: Codable {
                 } else {
                     let queue = try await client.queue()
                     try Task.checkCancellation()
+                    noteConnected(job.server)
                     guard let index = jobs.firstIndex(where: { $0.id == job.id && !$0.finished }) else { continue }
                     if queue.running.contains(where: { $0.promptID == prompt }) { jobs[index].state = "生成中" }
                     else if queue.pending.contains(where: { $0.promptID == prompt }) { jobs[index].state = "排队中" }
@@ -575,6 +684,7 @@ private struct SavedState: Codable {
                 try persist()
             } catch {
                 if Task.isCancelled { return }
+                noteConnectionFailure(error, config: job.server)
                 _ = noteVerification(error, config: job.server)
                 if let index = jobs.firstIndex(where: { $0.id == job.id && !$0.finished }) { jobs[index].detail = "查询未完成，恢复连接后继续查询：\(error.localizedDescription)" }
             }

@@ -310,6 +310,41 @@ struct PhotoPicker: UIViewControllerRepresentable {
     }
 }
 
+struct ReferenceVideoPicker: UIViewControllerRepresentable {
+    var onPick: (Result<URL, Error>) -> Void
+    @Environment(\.presentationMode) private var presentation
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration(); config.filter = .videos; config.selectionLimit = 1
+        config.preferredAssetRepresentationMode = .current
+        let picker = PHPickerViewController(configuration: config); picker.delegate = context.coordinator; return picker
+    }
+    func updateUIViewController(_ controller: PHPickerViewController, context: Context) {}
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let parent: ReferenceVideoPicker
+        init(_ parent: ReferenceVideoPicker) { self.parent = parent }
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            parent.presentation.wrappedValue.dismiss()
+            guard let provider = results.first?.itemProvider else { return }
+            let callback = parent.onPick
+            // The provider removes its URL after this callback; retain our own bounded copy.
+            provider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, error in
+                let result: Result<URL, Error> = Result {
+                    if let error = error { throw error }
+                    guard let url = url else { throw WorkflowError.invalid("无法读取所选视频，请先在相册下载后重试。") }
+                    let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                    guard size > 0, size <= 150_000_000 else { throw WorkflowError.invalid("视频为空或超过 150 MB，请先压缩。") }
+                    let ext = url.pathExtension.isEmpty ? "mov" : url.pathExtension
+                    let target = FileManager.default.temporaryDirectory.appendingPathComponent("reference-" + UUID().uuidString).appendingPathExtension(ext)
+                    try FileManager.default.copyItem(at: url, to: target)
+                    return target
+                }
+                DispatchQueue.main.async { callback(result) }
+            }
+        }
+    }
+}
+
 struct WorkflowFile: FileDocument {
     static var readableContentTypes: [UTType] { [.json] }
     var data: Data
