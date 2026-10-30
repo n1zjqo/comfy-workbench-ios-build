@@ -1,6 +1,6 @@
 # Comfy Workbench for iOS
 
-## 0.6.4 动态参考素材与结果展示（build 13，源码准备中）
+## 0.6.4 动态参考素材与结果展示（build 13，已构建）
 
 - 参数页从当前工作流的有效上传输入生成“参考素材”区。单图/单视频显示大预览，多份横向素材独占一行，竖向与方形素材并排；预览依据实际比例完整显示。混合工作流按图片、视频、音频分组，音频提供紧凑的试听入口；纯文字工作流不显示素材区。
 - 每份素材绑定节点 ID 与输入键。能直接确认的首帧、尾帧显示用途，共用一个加载节点的素材保持同一入口。可从相册选择图片或视频、从文件选择对应类型，单独替换或清空；保存后才改参数，沿用撤销与草稿。清空不删除服务器原文件，必填输入仍需重新选择后运行。
@@ -11,7 +11,7 @@
 
 当前限制：识别的是 JSON 已有的上传节点，不自动新增或连接 H3 动态端口；纯路径输入仍是路径编辑。支持标准上传标记及 VHS 视频/音频上传节点，参照 [VHS 视频加载实现](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite/blob/main/videohelpersuite/load_video_nodes.py)与[音频加载实现](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite/blob/main/videohelpersuite/nodes.py)。服务器已有的素材需要可访问才能预览；视频播放受 iOS 解码能力限制。单份上传上限 150 MB，照片上限 4000 万像素。
 
-本版 Swift 编译、XCTest、原生截图与 IPA 尚待批准后的 macOS Actions，未宣称已通过真机验收。
+0.6.4 已通过 [Actions 41037563618](https://github.com/n1zjqo/comfy-workbench-ios-build/actions/runs/41037563618)：104 项核心/网络、22 项原生、61 项 Python 检查通过，1 项设备文件保护检查在模拟器跳过。已核对 build 13、arm64、最低 iOS 15、签名和 SHA-256；已检查使用虚构素材的原生横图与混合素材截图。模拟器为 iOS 18.5，XS / iOS 15 的相册、上传与实际工作流仍需实机确认。
 
 ## 0.6.3 工作流、释放操作与验证页修复（build 12，已构建）
 
