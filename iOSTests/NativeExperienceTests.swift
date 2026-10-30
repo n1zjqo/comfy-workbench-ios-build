@@ -77,6 +77,7 @@ final class NativeExperienceTests: XCTestCase {
             UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 90, height: 160))
         }
         NativeComfyProtocol.previewData = portrait.pngData()!
+        NativeComfyProtocol.landscapeData = testImage().pngData()!
         let store = WorkbenchStore(storageURL: folder, clientFactory: NativeComfyProtocol.client)
         store.server = ServerConfig(baseURL: "https://example.com")
         let workflow = SavedWorkflow(name: "Mixed references", data: Data(#"{"1":{"class_type":"LoadImage","inputs":{"image":"portrait.png"}},"2":{"class_type":"LoadImage","inputs":{"image":""}},"3":{"class_type":"LoadAudio","inputs":{"audio":""}},"4":{"class_type":"VHS_LoadVideo","inputs":{"video":""}},"5":{"class_type":"MiniMaxH3ImageToVideo","inputs":{"first_frame":["1",0],"last_frame":["2",0]}}}"#.utf8))
@@ -89,8 +90,18 @@ final class NativeExperienceTests: XCTestCase {
         XCTAssertEqual(store.canvas?.referenceGroups.first?.inputs.first?.role, "首帧")
         XCTAssertTrue(store.jobs.isEmpty)
         try capturePreview(window, name: "reference-materials-portrait-mixed")
-        let preview = try host(ReferenceMaterialPreview(field: try XCTUnwrap(store.canvas?.fields.first), value: "", knownRatio: 16.0/9).padding(20).environmentObject(store).preferredColorScheme(.dark))
+        var loadedSize: CGSize?
+        var previewFrame = CGRect.zero
+        let preview = try host(ReferenceMaterialPreview(field: try XCTUnwrap(store.canvas?.fields.first), value: "landscape.png") { loadedSize = $0 }
+            .background(GeometryReader { geometry in Color.clear.preference(key: CardFramePreference.self, value: geometry.frame(in: .global)) })
+            .onPreferenceChange(CardFramePreference.self) { previewFrame = $0 }
+            .padding(20).environmentObject(store).preferredColorScheme(.dark))
         defer { preview.isHidden = true }
+        for _ in 0..<100 { if loadedSize != nil { break }; try await Task.sleep(nanoseconds: 10_000_000) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let dimensions = try XCTUnwrap(loadedSize)
+        XCTAssertEqual(dimensions.width / dimensions.height, 2, accuracy: 0.01)
+        XCTAssertEqual(previewFrame.width / max(1, previewFrame.height), 2, accuracy: 0.01)
         try capturePreview(preview, name: "reference-materials-landscape")
     }
 
@@ -307,7 +318,7 @@ final class NativeExperienceTests: XCTestCase {
             XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
         }
         let attachment = XCTAttachment(image: render); attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
-        guard name.hasPrefix("strata-") else { return }
+        guard name.hasPrefix("strata-") || name.hasPrefix("reference-") else { return }
         // Synthetic fixtures only. Export the native render through the CI log for visual review.
         let encoded = Array(try XCTUnwrap(render.pngData()).base64EncodedString().utf8)
         let count = (encoded.count + 4095) / 4096
@@ -499,6 +510,7 @@ private final class NativeComfyProtocol: URLProtocol {
     private static var recorded: [String] = []
     static var holdStats = false
     static var previewData = Data()
+    static var landscapeData = Data()
     static var paths: [String] { lock.lock(); defer { lock.unlock() }; return recorded }
     static var hasPending: Bool { lock.lock(); defer { lock.unlock() }; return pending != nil }
     static func client(_ config: ServerConfig) -> ComfyClient {
@@ -520,7 +532,7 @@ private final class NativeComfyProtocol: URLProtocol {
         case "/upload/image":
             XCTAssertEqual(request.httpMethod, "POST")
             reply(Data(#"{"name":"uploaded.png","subfolder":"references","type":"input"}"#.utf8))
-        case "/view": reply(Self.previewData, type: "image/png")
+        case "/view": reply(request.url?.query?.contains("landscape.png") == true ? Self.landscapeData : Self.previewData, type: "image/png")
         default: XCTFail("Unexpected synthetic request: \(path)"); client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
         }
     }
@@ -534,7 +546,7 @@ private final class NativeComfyProtocol: URLProtocol {
         lock.lock(); let old = pending; pending = nil; lock.unlock()
         if let old = old { old.client?.urlProtocol(old, didFailWithError: URLError(.timedOut)) }
     }
-    static func reset() { failOldProbe(); lock.lock(); recorded = []; lock.unlock(); holdStats = false; previewData = Data() }
+    static func reset() { failOldProbe(); lock.lock(); recorded = []; lock.unlock(); holdStats = false; previewData = Data(); landscapeData = Data() }
 }
 
 private final class RefreshLayoutState: ObservableObject { @Published var refreshing = false }

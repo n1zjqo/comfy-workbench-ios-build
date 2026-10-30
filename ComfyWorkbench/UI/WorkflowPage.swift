@@ -276,35 +276,39 @@ struct ReferenceMaterialSection: View {
                                 if group.kind == .audio, !input.field.value.displayValue.isEmpty { playButton(input.field) }
                             }.padding(14).glass(16)
                         }
-                    } else {
-                        let rows = group.mediaRows(aspectRatios: ratios)
-                        ForEach(rows.indices, id: \.self) { index in
-                            HStack(alignment: .top, spacing: 12) {
-                                ForEach(rows[index]) { input in
-                                    VStack(alignment: .leading, spacing: 10) {
-                                        Button { edit(input.field) } label: {
-                                            VStack(alignment: .leading, spacing: 10) {
-                                                ReferenceMaterialPreview(field: input.field, value: input.field.value.displayValue, compact: rows[index].count > 1, knownRatio: ratios[input.id]) { size in
-                                                    let ratio = Double(size.width / max(1, size.height))
-                                                    if abs((ratios[input.id] ?? 0) - ratio) > 0.01 { ratios[input.id] = ratio }
-                                                }
-                                                caption(input)
-                                            }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                                        }.buttonStyle(.plain)
-                                        if group.kind == .video, !input.field.value.displayValue.isEmpty {
-                                            HStack { Text("预览视频").font(.caption).foregroundColor(.secondary); Spacer(); playButton(input.field) }
-                                        }
-                                    }.padding(12).frame(maxWidth: cardWidth(input, paired: rows[index].count > 1), alignment: .topLeading).glass(16)
-                                }
-                            }.frame(maxWidth: .infinity)
-                        }
-                    }
+                    } else { visualGroup(group) }
                 }
                 if let error = error { Text(error).font(.caption).foregroundColor(.orange) }
             }.padding(.vertical, 6).disabled(store.busy)
                 .sheet(item: $playback) { ReferencePlayer(url: $0.url) }
                 .onChange(of: store.selectedID) { _ in ratios = [:]; error = nil; playback = nil }
         }
+    }
+    private func visualGroup(_ group: WorkflowReferenceGroup) -> some View {
+        let rows = group.mediaRows(aspectRatios: ratios)
+        return VStack(spacing: 12) {
+            ForEach(rows.indices, id: \.self) { index in
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(rows[index]) { input in mediaCard(input, paired: rows[index].count > 1) }
+                }.frame(maxWidth: .infinity)
+            }
+        }
+    }
+    private func mediaCard(_ input: WorkflowReferenceInput, paired: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button { edit(input.field) } label: {
+                VStack(alignment: .leading, spacing: 10) {
+                    ReferenceMaterialPreview(field: input.field, value: input.field.value.displayValue, compact: paired, knownRatio: ratios[input.id]) { size in
+                        let ratio = Double(size.width / max(1, size.height))
+                        if abs((ratios[input.id] ?? 0) - ratio) > 0.01 { ratios[input.id] = ratio }
+                    }
+                    caption(input)
+                }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(.plain)
+            if input.field.materialKind == .video, !input.field.value.displayValue.isEmpty {
+                HStack { Text("预览视频").font(.caption).foregroundColor(.secondary); Spacer(); playButton(input.field) }
+            }
+        }.padding(12).frame(maxWidth: cardWidth(input, paired: paired), alignment: .topLeading).glass(16)
     }
     private func caption(_ input: WorkflowReferenceInput) -> some View {
         VStack(alignment: .leading, spacing: 5) {
