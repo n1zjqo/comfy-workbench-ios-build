@@ -91,18 +91,30 @@ final class NativeExperienceTests: XCTestCase {
         XCTAssertTrue(store.jobs.isEmpty)
         try capturePreview(window, name: "reference-materials-portrait-mixed")
         var loadedSize: CGSize?
-        var previewFrame = CGRect.zero
         let preview = try host(ReferenceMaterialPreview(field: try XCTUnwrap(store.canvas?.fields.first), value: "landscape.png") { loadedSize = $0 }
-            .background(GeometryReader { geometry in Color.clear.preference(key: CardFramePreference.self, value: geometry.frame(in: .global)) })
-            .onPreferenceChange(CardFramePreference.self) { previewFrame = $0 }
             .padding(20).environmentObject(store).preferredColorScheme(.dark))
         defer { preview.isHidden = true }
         for _ in 0..<100 { if loadedSize != nil { break }; try await Task.sleep(nanoseconds: 10_000_000) }
         try await Task.sleep(nanoseconds: 100_000_000)
         let dimensions = try XCTUnwrap(loadedSize)
         XCTAssertEqual(dimensions.width / dimensions.height, 2, accuracy: 0.01)
-        XCTAssertEqual(previewFrame.width / max(1, previewFrame.height), 2, accuracy: 0.01)
-        try capturePreview(preview, name: "reference-materials-landscape")
+        let rendered = try capturePreview(preview, name: "reference-materials-landscape")
+        let pixel = try rgba(rendered)
+        let width = try XCTUnwrap(rendered.cgImage).width
+        let height = try XCTUnwrap(rendered.cgImage).height
+        var left = width, right = -1, bottom = height, top = -1
+        for y in 0..<height {
+            for x in 0..<width {
+                let color = pixel(x, y)
+                if color.0 > 240 && color.1 < 15 && color.2 < 15 {
+                    left = min(left, x); right = max(right, x)
+                    bottom = min(bottom, y); top = max(top, y)
+                }
+            }
+        }
+        // Measure the rendered image, not the flexible container or a deferred preference.
+        XCTAssertGreaterThan(right - left, 600)
+        XCTAssertEqual(Double(right - left + 1) / Double(max(1, top - bottom + 1)), 2, accuracy: 0.02)
     }
 
     @MainActor func testReleaseResultCannotBeOverwrittenByAnOlderStatusPoll() async throws {
@@ -312,13 +324,13 @@ final class NativeExperienceTests: XCTestCase {
         XCTAssertFalse(descendants(window).contains { String(describing: type(of: $0)).contains("WebView") })
         try capturePreview(window, name: "pairing")
     }
-    @MainActor private func capturePreview(_ window: UIWindow, name: String) throws {
+    @MainActor @discardableResult private func capturePreview(_ window: UIWindow, name: String) throws -> UIImage {
         let format = UIGraphicsImageRendererFormat(); format.scale = 2
         let render = UIGraphicsImageRenderer(bounds: window.bounds, format: format).image { _ in
             XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
         }
         let attachment = XCTAttachment(image: render); attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
-        guard name.hasPrefix("strata-") || name.hasPrefix("reference-") else { return }
+        guard name.hasPrefix("strata-") || name.hasPrefix("reference-") else { return render }
         // Synthetic fixtures only. Export the native render through the CI log for visual review.
         let encoded = Array(try XCTUnwrap(render.pngData()).base64EncodedString().utf8)
         let count = (encoded.count + 4095) / 4096
@@ -326,6 +338,7 @@ final class NativeExperienceTests: XCTestCase {
             let chunk = String(decoding: encoded[(index * 4096)..<min(encoded.count, (index + 1) * 4096)], as: UTF8.self)
             print("NATIVE_PREVIEW \(name) \(index)/\(count) \(chunk)")
         }
+        return render
     }
     @MainActor func testClipboardHistoryCopiesAndPersistsWithoutEcho() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
