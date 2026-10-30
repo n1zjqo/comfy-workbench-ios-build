@@ -97,12 +97,14 @@ class Gateway(GPUCoordinator):
         self.pause_revision = 0
         self.state_path = Path(config['state_file'])
         self.paused = False
+        self.manually_released = False
         if self.state_path.exists():
             try:
                 value = json.loads(self.state_path.read_text())
                 if type(value['paused']) is not bool:
                     raise ValueError('Invalid pause state')
                 self.paused = value['paused']
+                self.manually_released = value.get('manually_released') is True
             except Exception:
                 # Corruption must never turn a paused server back on.
                 self.paused = True
@@ -125,11 +127,33 @@ class Gateway(GPUCoordinator):
                          inFlight=int(status['activity']['in_flight']), gpu={k: float(v) for k, v in status.get('machine', {}).get('gpu', {}).items() if k in ('total_mib', 'used_mib') and isinstance(v, (int, float))})
         except Exception:
             value.update(online=False, loaded=False, model='', inFlight=0, gpu={})
+        try:
+            value['comfyResources'] = self.comfy_resources()
+        except Exception:
+            value['comfyResources'] = None
         return value
 
     def persist_pause(self, value):
-        atomic_json(self.state_path, {'paused': value})
+        atomic_json(self.state_path, {'paused': value, 'manually_released': self.manually_released})
         self.paused = value
+
+    def comfy_resources(self):
+        value = self.upstream.json('/workbench/resources', comfy=True)
+        count = value.get('loadedModels')
+        if value.get('protocolVersion') != 1 or type(count) is not int or count < 0:
+            raise Failure('无法确认 ComfyUI 驻留模型状态', 503)
+        return {'loadedModels': count}
+
+    def wait_for_comfy_release(self):
+        deadline = time.monotonic() + 30
+        while True:
+            if self.comfy_queue_busy():
+                raise Failure('ComfyUI 有新任务，未确认模型释放；没有中断任务')
+            if self.comfy_resources()['loadedModels'] == 0:
+                return
+            if time.monotonic() >= deadline:
+                raise Failure('ComfyUI 已接收释放请求，但尚未确认模型卸载，请刷新状态')
+            time.sleep(0.25)
 
     def check_idle(self):
         state = self.upstream.json('/v1/status')
@@ -188,6 +212,9 @@ class Gateway(GPUCoordinator):
             if self.active:
                 raise Failure('Strata 正在处理另一个请求，请稍后发送')
             self.prepare_load()
+            if self.manually_released:
+                self.manually_released = False
+                self.persist_pause(self.paused)
             self.active += 1
         try:
             yield
@@ -213,6 +240,10 @@ class Gateway(GPUCoordinator):
             if action == 'pause' and self.active:
                 return self.status()
             self.check_idle()
+            if action == 'release':
+                self.manually_released = True
+                self.restore_after_comfy = False
+                self.persist_pause(self.paused)
             self.maintenance = True
             pause_revision = self.pause_revision
         try:
@@ -220,7 +251,9 @@ class Gateway(GPUCoordinator):
                 queue = self.upstream.json('/queue', comfy=True)
                 if queue.get('queue_running') != [] or queue.get('queue_pending') != []:
                     raise Failure('ComfyUI 队列未清空，不能释放模型')
+                self.comfy_resources()  # Require the paired observer before issuing a release.
                 self.upstream.json('/free', {'unload_models': True, 'free_memory': True}, comfy=True)
+                self.wait_for_comfy_release()
             elif action in ('release', 'pause', 'reload'):
                 if self.health().get('loaded'):
                     self.upstream.json('/unload?wait=0', {})
@@ -238,9 +271,11 @@ class Gateway(GPUCoordinator):
                     raise Failure('模型尚未就绪', 503)
                 with self.lock:
                     # Pause requested during a slow load must win over its completion.
+                    if self.pause_revision == pause_revision:
+                        self.manually_released = False
+                        self.persist_pause(self.paused)
                     if action == 'resume' and self.pause_revision == pause_revision:
                         self.persist_pause(False)
-            return self.status()
         finally:
             with self.lock:
                 self.maintenance = False
@@ -249,6 +284,7 @@ class Gateway(GPUCoordinator):
                         if task['state'] in ('paused', 'waiting_comfy'):
                             task['state'] = 'running'
                             threading.Thread(target=self.run_task, args=(task,), daemon=True).start()
+        return self.status()
 
     def drain_once(self):
         with self.lock:

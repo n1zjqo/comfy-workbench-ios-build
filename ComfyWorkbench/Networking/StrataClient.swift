@@ -13,6 +13,9 @@ public struct StrataInfo: Codable, Equatable {
     public var serverId: String
     public var name: String
 }
+public struct ComfyResources: Codable, Equatable {
+    public var loadedModels: Int
+}
 public struct StrataStatus: Codable, Equatable {
     public var online: Bool
     public var loaded: Bool
@@ -25,6 +28,8 @@ public struct StrataStatus: Codable, Equatable {
     public var gpuPolicy: String? = nil
     public var gpuPhase: String? = nil
     public var gpuError: String? = nil
+    public var comfyResources: ComfyResources? = nil
+    public var manuallyReleased: Bool? = nil
     public var title: String {
         if paused && !online { return "已暂停 · 推理服务状态待确认" }
         if paused { return loaded ? "已暂停 · 等待释放资源" : "已暂停 · 需手动恢复" }

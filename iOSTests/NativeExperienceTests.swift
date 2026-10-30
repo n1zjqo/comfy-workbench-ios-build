@@ -2,9 +2,53 @@ import XCTest
 import SwiftUI
 import UIKit
 import Combine
+import WebKit
 @testable import ComfyWorkbench
 
 final class NativeExperienceTests: XCTestCase {
+    @MainActor func testReleaseResultCannotBeOverwrittenByAnOlderStatusPoll() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { DelayedStrataProtocol.reset(); try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("strata.json")
+        let saved: [String: Any] = ["profile": ["lanURL": "", "publicURL": "https://example.com", "serverID": DelayedStrataProtocol.identity, "tokenKey": "synthetic-test"], "messages": [], "tasks": [], "draft": ""]
+        try JSONSerialization.data(withJSONObject: saved).write(to: file)
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [DelayedStrataProtocol.self]
+        let strata = StrataStore(storage: file, client: StrataClient(configuration: config), credentialReader: { _ in "synthetic-token" })
+        let refresh = Task { await strata.refresh() }
+        for _ in 0..<100 {
+            if DelayedStrataProtocol.hasPending { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(DelayedStrataProtocol.hasPending)
+        await strata.control("release")
+        XCTAssertEqual(strata.status?.loaded, false)
+        XCTAssertTrue(strata.controlNotice?.contains("已卸载") == true)
+        XCTAssertNil(strata.notice)
+        DelayedStrataProtocol.releaseOldStatus()
+        await refresh.value
+        XCTAssertEqual(strata.status?.loaded, false)
+        XCTAssertFalse(strata.busy)
+        XCTAssertEqual(DelayedStrataProtocol.postCount, 1)
+    }
+
+    @MainActor func testVerificationPageKeepsProviderContentAndNativeRecoveryControls() throws {
+        let controller = VerificationBrowserController(url: URL(string: "https://example.com/workbench/info")!, onFinish: {})
+        controller.startsAutomatically = false
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 375, height: 812)
+        controller.view.layoutIfNeeded()
+        XCTAssertTrue(controller.webView.configuration.userContentController.userScripts.isEmpty)
+        XCTAssertTrue(controller.webView.configuration.websiteDataStore.isPersistent)
+        XCTAssertNil(controller.webView.url) // Rendering alone must not contact a real service in tests.
+        XCTAssertGreaterThan(controller.webView.bounds.height, 350)
+        let titles = descendants(controller.view).compactMap { ($0 as? UIButton)?.title(for: .normal) }
+        XCTAssertTrue(titles.contains("分享验证页")); XCTAssertTrue(titles.contains("Safari 打开")); XCTAssertTrue(titles.contains("完成检查"))
+        XCTAssertTrue(VerificationBrowserController.isSecureWebURL(URL(string: "https://example.com/verify")!))
+        for text in ["http://example.com", "https://user:secret@example.com", "file:///etc/passwd", "javascript:alert(1)"] {
+            XCTAssertFalse(VerificationBrowserController.isSecureWebURL(URL(string: text)!))
+        }
+    }
     @MainActor func testNativeMessageSelectionKeepsSelectedTextDuringStreaming() throws {
         let window = try host(SelectableMessageText(text: "测试文字 hello world").padding(24).preferredColorScheme(.dark))
         defer { window.isHidden = true }
@@ -393,5 +437,40 @@ private final class QuietClipboardProtocol: URLProtocol {
         client?.urlProtocol(self, didLoad: Data(json.utf8)); client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+private final class DelayedStrataProtocol: URLProtocol {
+    static let identity = "20dc53dc-5504-4d0d-911e-1b107e886f88"
+    private static let lock = NSLock()
+    private static var pending: DelayedStrataProtocol?
+    private static var posts = 0
+    static var hasPending: Bool { lock.lock(); defer { lock.unlock() }; return pending != nil }
+    static var postCount: Int { lock.lock(); defer { lock.unlock() }; return posts }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        if request.url!.path.hasSuffix("info") {
+            reply("{\"protocolVersion\":1,\"service\":\"strata-workbench\",\"serverId\":\"\(Self.identity)\",\"name\":\"Synthetic\"}")
+        } else if request.httpMethod == "POST" {
+            Self.lock.lock(); Self.posts += 1; Self.lock.unlock()
+            reply(Self.state(loaded: false))
+        } else {
+            Self.lock.lock(); Self.pending = self; Self.lock.unlock()
+        }
+    }
+    override func stopLoading() {}
+    static func state(loaded: Bool) -> String {
+        "{\"online\":true,\"loaded\":\(loaded),\"paused\":false,\"activeRequests\":0,\"maintenance\":false,\"inFlight\":0,\"model\":\"synthetic\",\"gpu\":{}}"
+    }
+    private func reply(_ body: String) {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8)); client?.urlProtocolDidFinishLoading(self)
+    }
+    static func releaseOldStatus() {
+        lock.lock(); let request = pending; pending = nil; lock.unlock()
+        request?.reply(state(loaded: true))
+    }
+    static func reset() { releaseOldStatus(); lock.lock(); posts = 0; lock.unlock() }
 }
 

@@ -1,7 +1,7 @@
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
-import SafariServices
+import WebKit
 
 struct VerificationPage: Identifiable {
     let id = UUID()
@@ -11,18 +11,130 @@ struct VerificationPage: Identifiable {
 struct VerificationBrowser: UIViewControllerRepresentable {
     let url: URL
     let onFinish: () -> Void
-    func makeCoordinator() -> Coordinator { Coordinator(onFinish) }
-    func makeUIViewController(context: Context) -> SFSafariViewController {
-        // Authentication stays in the system browser; no password or cookie is read by this app.
-        let browser = SFSafariViewController(url: url)
-        browser.delegate = context.coordinator
-        return browser
+    func makeUIViewController(context: Context) -> VerificationBrowserController {
+        VerificationBrowserController(url: url, onFinish: onFinish)
     }
-    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
-    final class Coordinator: NSObject, SFSafariViewControllerDelegate {
-        let finish: () -> Void
-        init(_ finish: @escaping () -> Void) { self.finish = finish }
-        func safariViewControllerDidFinish(_ controller: SFSafariViewController) { finish() }
+    func updateUIViewController(_ controller: VerificationBrowserController, context: Context) {}
+}
+
+/// The provider renders its own live QR challenge. No scripts, credentials or cookies are extracted.
+final class VerificationBrowserController: UIViewController, WKNavigationDelegate, WKUIDelegate {
+    let initialURL: URL
+    let onFinish: () -> Void
+    let webView: WKWebView
+    private let domain = UILabel()
+    private let statusLabel = UILabel()
+    private let progress = UIProgressView(progressViewStyle: .default)
+    private let shareButton = UIButton(type: .system)
+    private var observation: NSKeyValueObservation?
+    private var hasPage = false
+    private var started = false
+    var startsAutomatically = true
+
+    init(url: URL, onFinish: @escaping () -> Void) {
+        initialURL = url; self.onFinish = onFinish
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        webView = WKWebView(frame: .zero, configuration: config)
+        super.init(nibName: nil, bundle: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = UIColor(red: 17/255, green: 30/255, blue: 39/255, alpha: 1)
+        let title = UILabel(); title.text = "网页验证"; title.font = .systemFont(ofSize: 20, weight: .semibold); title.textColor = .white
+        let done = button("完成检查", action: #selector(finish))
+        let close = button("关闭", action: #selector(finish))
+        let header = UIStackView(arrangedSubviews: [close, title, done]); header.axis = .horizontal; header.distribution = .equalSpacing; header.alignment = .center
+        domain.font = .systemFont(ofSize: 13); domain.textColor = .lightGray; domain.numberOfLines = 2
+        domain.text = initialURL.host; domain.accessibilityIdentifier = "verification-domain"
+        statusLabel.font = .systemFont(ofSize: 14); statusLabel.textColor = .white; statusLabel.numberOfLines = 0
+        statusLabel.text = "二维码由 DDNSTO 官方网页提供。可分享页面截图，再用微信扫一扫识别。"
+        statusLabel.accessibilityIdentifier = "verification-status"
+        let top = UIStackView(arrangedSubviews: [header, domain, statusLabel, progress]); top.axis = .vertical; top.spacing = 10
+        let reload = button("刷新", action: #selector(reloadPage))
+        let safari = button("Safari 打开", action: #selector(openSafari))
+        shareButton.setTitle("分享验证页", for: .normal); shareButton.addTarget(self, action: #selector(sharePage), for: .touchUpInside); shareButton.isEnabled = false
+        let actions = UIStackView(arrangedSubviews: [reload, safari, shareButton]); actions.axis = .horizontal; actions.distribution = .fillEqually
+        webView.navigationDelegate = self; webView.uiDelegate = self
+        webView.backgroundColor = .white; webView.isOpaque = true
+        webView.allowsBackForwardNavigationGestures = true
+        for item in [top, webView, actions] { item.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(item) }
+        NSLayoutConstraint.activate([
+            top.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            top.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18), top.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
+            header.heightAnchor.constraint(equalToConstant: 44),
+            webView.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 12), webView.leadingAnchor.constraint(equalTo: view.leadingAnchor), webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            webView.bottomAnchor.constraint(equalTo: actions.topAnchor),
+            actions.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10), actions.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            actions.heightAnchor.constraint(equalToConstant: 52), actions.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor)
+        ])
+        observation = webView.observe(\.estimatedProgress, options: [.new]) { [weak self] web, _ in
+            self?.progress.progress = Float(web.estimatedProgress)
+        }
+    }
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard startsAutomatically, !started else { return }; started = true; reloadPage()
+    }
+    private func button(_ title: String, action: Selector) -> UIButton {
+        let item = UIButton(type: .system); item.setTitle(title, for: .normal); item.addTarget(self, action: action, for: .touchUpInside); return item
+    }
+    static func isSecureWebURL(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "https" && url.host?.isEmpty == false && url.user == nil && url.password == nil
+    }
+    @objc private func finish() { onFinish() }
+    @objc private func reloadPage() {
+        let url = webView.url.flatMap { Self.isSecureWebURL($0) ? $0 : nil } ?? initialURL
+        guard Self.isSecureWebURL(url) else { showError("验证入口必须是没有内嵌密码的 HTTPS 地址。"); return }
+        hasPage = false; shareButton.isEnabled = false
+        statusLabel.text = "正在加载官方验证页…"; progress.isHidden = false
+        // Plain navigation only: no app API token or Authorization header accompanies this request.
+        webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30))
+    }
+    @objc private func openSafari() {
+        let url = webView.url.flatMap { Self.isSecureWebURL($0) ? $0 : nil } ?? initialURL
+        guard Self.isSecureWebURL(url) else { return }
+        UIApplication.shared.open(url)
+    }
+    @objc private func sharePage() {
+        guard hasPage else { return }
+        let snapshot = WKSnapshotConfiguration(); snapshot.rect = webView.bounds
+        webView.takeSnapshot(with: snapshot) { [weak self] image, error in
+            guard let self = self else { return }
+            guard error == nil, let image = image else { self.showError("页面截图未成功，可直接使用手机截屏。"); return }
+            let sheet = UIActivityViewController(activityItems: [image], applicationActivities: nil)
+            sheet.popoverPresentationController?.sourceView = self.shareButton
+            sheet.popoverPresentationController?.sourceRect = self.shareButton.bounds
+            self.present(sheet, animated: true)
+        }
+    }
+    private func showError(_ text: String) { statusLabel.text = text; progress.isHidden = true }
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        progress.isHidden = false; hasPage = false; shareButton.isEnabled = false
+        domain.text = webView.url?.host ?? initialURL.host
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        domain.text = webView.url?.host ?? initialURL.host; progress.isHidden = true; hasPage = true; shareButton.isEnabled = true
+        statusLabel.text = "在下方完成官方验证。若有二维码，可分享页面截图供微信识别；完成后点“完成检查”。"
+    }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
+    private func failed(_ error: Error) {
+        if (error as? URLError)?.code == .cancelled { return }
+        showError("网页未能加载：\(error.localizedDescription)。可刷新或在 Safari 打开。")
+    }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { showError("验证页面已停止，请点刷新重新打开。"); hasPage = false; shareButton.isEnabled = false }
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
+        if Self.isSecureWebURL(url) || (url.absoluteString == "about:blank" && navigationAction.targetFrame?.isMainFrame == false) { decisionHandler(.allow); return }
+        if navigationAction.navigationType == .linkActivated, url.scheme?.lowercased() == "weixin" { UIApplication.shared.open(url) }
+        else { showError("此跳转无法在验证页中打开，可使用 Safari 继续。"); }
+        decisionHandler(.cancel)
+    }
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if navigationAction.targetFrame == nil, let url = navigationAction.request.url, Self.isSecureWebURL(url) { webView.load(URLRequest(url: url)) }
+        return nil
     }
 }
 

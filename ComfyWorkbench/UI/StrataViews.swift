@@ -23,7 +23,8 @@ struct PlacesConnectionPage: View {
     @EnvironmentObject var store: WorkbenchStore
     @State private var settings = false
     @State private var comfySettings = false
-    @State private var confirmation: String?
+    @State private var confirmation = "release"
+    @State private var confirmationVisible = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
@@ -59,9 +60,18 @@ struct PlacesConnectionPage: View {
                         }.frame(minHeight: 38, alignment: .topLeading)
                         if let gpu = strata.status?.gpu, let used = gpu["used_mib"], let total = gpu["total_mib"], total > 0 {
                             VStack(alignment: .leading, spacing: 7) {
-                                HStack { Text("显存"); Spacer(); Text(String(format: "%.1f / %.1f GB", used / 1024, total / 1024)).monospacedDigit() }.font(.caption).foregroundColor(.secondary)
+                                HStack { Text("整张显卡占用"); Spacer(); Text(String(format: "%.1f / %.1f GB", used / 1024, total / 1024)).monospacedDigit() }.font(.caption).foregroundColor(.secondary)
                                 ProgressView(value: min(max(used / total, 0), 1)).tint(Color(red: 0.54, green: 0.78, blue: 0.78))
+                                Text("包含 Strata、ComfyUI 和远程桌面；释放模型后不一定归零。")
+                                    .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                             }
+                        }
+                        if let resources = strata.status?.comfyResources {
+                            HStack {
+                                Text("ComfyUI 驻留模型")
+                                Spacer()
+                                Text(resources.loadedModels == 0 ? "已卸载" : "\(resources.loadedModels) 个")
+                            }.font(.caption).foregroundColor(.secondary)
                         }
                         if strata.profile.serverID.isEmpty {
                             Button("设置办公室连接") { settings = true }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink)
@@ -70,13 +80,13 @@ struct PlacesConnectionPage: View {
                         } else {
                             HStack(spacing: 10) {
                                 Button("加载模型") { Task { await strata.control("load") } }.buttonStyle(.borderedProminent).tint(Palette.paper).foregroundColor(Palette.ink)
-                                Button("释放显存") { confirmation = "release" }.buttonStyle(.bordered)
-                                Button("暂停接收") { confirmation = "pause" }.buttonStyle(.bordered)
+                                Button("释放显存") { confirm("release") }.buttonStyle(.bordered)
+                                Button("暂停接收") { confirm("pause") }.buttonStyle(.bordered)
                             }.font(.subheadline)
                         }
                         Text("释放显存：空闲时卸载，下次对话自动加载。\n暂停接收：拒绝新请求，当前生成完成后卸载，手动恢复后继续。\n两项操作都会保留控制服务，方便你远程重新开启。").font(.caption).foregroundColor(.secondary).lineSpacing(4)
                         if strata.status?.gpuPolicy == "comfy_priority" {
-                            Text("ComfyUI 优先：生成前自动让出显存，队列空闲 10 秒后恢复 Strata。手动暂停后不会自动恢复。")
+                            Text("ComfyUI 优先：生成前自动让出显存，队列空闲 10 秒后恢复 Strata。手动暂停或释放后不会自动恢复；释放后仍可用新对话唤醒。")
                                 .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                             if let issue = strata.status?.gpuError, !issue.isEmpty {
                                 Text(issue).font(.caption).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true)
@@ -86,10 +96,14 @@ struct PlacesConnectionPage: View {
                             if strata.busy { ProgressView().scaleEffect(0.8); Text("操作进行中").font(.caption) }
                             Spacer()
                             Menu {
-                                Button("重新加载模型") { confirmation = "reload" }
-                                Button("释放 ComfyUI 驻留模型") { confirmation = "free_comfy" }
+                                Button("重新加载模型") { confirm("reload") }
+                                Button("释放 ComfyUI 驻留模型") { confirm("free_comfy") }
                             } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
                         }.frame(height: 32)
+                        if let notice = strata.controlNotice {
+                            Text(notice).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("strata-control-notice")
+                        }
                     }.padding(18).glass(22).disabled(strata.busy)
                     Button { comfySettings = true } label: {
                         HStack(spacing: 14) {
@@ -109,11 +123,12 @@ struct PlacesConnectionPage: View {
         .sheet(isPresented: $comfySettings) {
             NavigationView { ConnectionPage().navigationTitle("ComfyUI").navigationBarTitleDisplayMode(.inline).toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { comfySettings = false } } } }.navigationViewStyle(.stack)
         }
-        .confirmationDialog(confirmationTitle, isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }), titleVisibility: .visible) {
-            Button("确认操作") { if let action = confirmation { Task { await strata.control(action) } }; confirmation = nil }
-            Button("取消", role: .cancel) { confirmation = nil }
+        .confirmationDialog(confirmationTitle, isPresented: $confirmationVisible, titleVisibility: .visible, presenting: confirmation) { action in
+            Button("确认操作") { Task { await strata.control(action) } }
+            Button("取消", role: .cancel) {}
         }
     }
+    private func confirm(_ action: String) { confirmation = action; confirmationVisible = true }
     private var confirmationTitle: String {
         switch confirmation {
         case "pause": return "暂停接收新请求？当前生成会继续完成，之后卸载模型。后续任务步骤等待手动恢复；这不会立即中断正在生成的内容。"
@@ -127,11 +142,10 @@ struct PlacesConnectionPage: View {
 struct StrataSettings: View {
     @EnvironmentObject var strata: StrataStore
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.scenePhase) private var phase
     @State private var lan = ""
     @State private var internet = ""
     @State private var token = ""
-    @State private var browserOpened = false
+    @State private var verificationPage: VerificationPage?
     var body: some View {
         NavigationView {
             Form {
@@ -145,7 +159,7 @@ struct StrataSettings: View {
                     Button("打开公网验证") {
                         do {
                             let url = try ClipboardEndpoint.url(internet, publicAddress: true).appendingPathComponent("workbench/info")
-                            browserOpened = true; UIApplication.shared.open(url)
+                            verificationPage = VerificationPage(url: url)
                         } catch { strata.notice = error.localizedDescription }
                     }.disabled(internet.isEmpty)
                     Text(strata.route).font(.caption).foregroundColor(.secondary)
@@ -158,7 +172,9 @@ struct StrataSettings: View {
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }.navigationViewStyle(.stack)
             .onAppear { lan = strata.profile.lanURL; internet = strata.profile.publicURL }
-            .onChange(of: phase) { value in if value == .active && browserOpened { browserOpened = false; Task { await strata.configure(lan: lan, internet: internet, token: token) } } }
+            .sheet(item: $verificationPage, onDismiss: { Task { await strata.configure(lan: lan, internet: internet, token: token) } }) { page in
+                VerificationBrowser(url: page.url) { verificationPage = nil }
+            }
     }
 }
 

@@ -111,6 +111,48 @@ class GPUCoordinatorTests(unittest.TestCase):
         self.assertFalse(self.up.loaded)
         self.assertNotIn('/load', self.up.calls)
 
+    def test_manual_release_cancels_pending_automatic_restore(self):
+        self.gate.acquire_comfy()
+        self.gate.comfy_idle()
+        self.cycle(100)
+        result = self.gate.control('release')
+        self.assertFalse(result['maintenance'])
+        self.assertTrue(result['manuallyReleased'])
+        self.cycle(111)
+        self.assertFalse(self.up.loaded)
+        self.assertFalse(self.gate.comfy_requested)
+        self.assertNotIn('/load', self.up.calls)
+
+    def test_manual_release_persists_and_chat_can_wake_it(self):
+        self.gate.control('release')
+        gate = Gateway(self.config, self.up)
+        self.assertTrue(gate.manually_released)
+        self.assertFalse(gate.paused)
+        self.gate = gate
+        gate.acquire_comfy()
+        self.finish_comfy()
+        self.assertFalse(self.up.loaded)
+        with gate.admission():
+            self.assertFalse(gate.manually_released)
+        gate.acquire_comfy()
+        self.finish_comfy()
+        self.assertTrue(self.up.loaded)
+
+    def test_manual_release_never_discards_comfy_worker_reservation(self):
+        self.gate.acquire_comfy()
+        self.gate.control('release')
+        self.cycle(100000)
+        self.assertTrue(self.gate.comfy_worker_reserved)
+        self.assertFalse(self.up.loaded)
+
+    def test_explicit_load_reenables_automatic_restore(self):
+        self.gate.control('release')
+        self.gate.control('load')
+        self.assertFalse(self.gate.manually_released)
+        self.gate.acquire_comfy()
+        self.finish_comfy()
+        self.assertTrue(self.up.loaded)
+
     def test_paused_during_slow_restore_unloads_again(self):
         self.gate.acquire_comfy()
         self.up.on_load = lambda: self.gate.control('pause')

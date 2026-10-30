@@ -19,6 +19,7 @@ class FakeUpstream:
         self.comfy_pending = []
         self.free = 32000
         self.on_load = None
+        self.comfy_models = 2
     def json(self, path, body=None, comfy=False):
         self.calls.append(path)
         if path == '/health':
@@ -36,7 +37,10 @@ class FakeUpstream:
         if path == '/queue':
             return {'queue_running': self.comfy_running, 'queue_pending': self.comfy_pending}
         if path == '/free':
+            self.comfy_models = 0
             return {}
+        if path == '/workbench/resources':
+            return {'protocolVersion': 1, 'loadedModels': self.comfy_models}
         raise AssertionError(path)
 
 
@@ -58,6 +62,40 @@ class BridgeTests(unittest.TestCase):
         with self.gate.admission():
             self.assertEqual(self.gate.active, 1)
         self.assertEqual(self.gate.active, 0)
+
+    def test_free_comfy_waits_for_worker_confirmation(self):
+        original = self.up.json
+        samples = iter([2, 2, 0])
+        def delayed(path, *args, **kwargs):
+            if path == '/workbench/resources':
+                return {'protocolVersion': 1, 'loadedModels': next(samples, 0)}
+            return original(path, *args, **kwargs)
+        self.up.json = delayed
+        with patch('bridge.time.sleep') as wait:
+            result = self.gate.control('free_comfy')
+        self.assertEqual(wait.call_count, 1)
+        self.assertEqual(result['comfyResources']['loadedModels'], 0)
+        self.assertFalse(result['maintenance'])
+        self.assertTrue(result['loaded'])  # Strata is a separate model owner.
+
+    def test_free_comfy_timeout_is_not_reported_as_success(self):
+        original = self.up.json
+        def unchanged(path, *args, **kwargs):
+            if path == '/free':
+                return {}
+            return original(path, *args, **kwargs)
+        self.up.json = unchanged
+        with patch('bridge.time.monotonic', side_effect=[0, 31]):
+            with self.assertRaises(Failure):
+                self.gate.control('free_comfy')
+        self.assertFalse(self.gate.maintenance)
+
+    def test_missing_resource_observer_does_not_issue_release(self):
+        original = self.up.json
+        self.up.json = lambda p,*a,**k: {} if p == '/workbench/resources' else original(p,*a,**k)
+        with self.assertRaises(Failure):
+            self.gate.control('free_comfy')
+        self.assertNotIn('/free', self.up.calls)
     def test_pause_blocks_legacy_and_app_until_resume(self):
         self.gate.control('pause')
         self.assertFalse(self.up.loaded)

@@ -114,8 +114,6 @@ private struct ClipboardThumbnail: View {
 struct ClipboardSettings: View {
     @EnvironmentObject var sync: ClipboardSyncStore
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openURL) private var openURL
-    @Environment(\.scenePhase) private var scenePhase
     @State private var lan = ""
     @State private var internet = ""
     @State private var name = UIDevice.current.name
@@ -124,7 +122,7 @@ struct ClipboardSettings: View {
     @State private var checking = false
     @State private var connection: ClipboardConnection?
     @State private var connectionError: String?
-    @State private var verificationPending = false
+    @State private var verificationPage: VerificationPage?
     @State private var loaded = false
     @State private var disconnect = false
     var body: some View {
@@ -161,11 +159,8 @@ struct ClipboardSettings: View {
         }
         .onChange(of: lan) { _ in invalidateConnection() }
         .onChange(of: internet) { _ in invalidateConnection() }
-        .onChange(of: scenePhase) { phase in
-            if phase == .active && verificationPending {
-                verificationPending = false
-                Task { await checkConnection() }
-            }
+        .sheet(item: $verificationPage, onDismiss: { Task { await checkConnection() } }) { page in
+            VerificationBrowser(url: page.url) { verificationPage = nil }
         }
         .confirmationDialog("断开配对？", isPresented: $disconnect, titleVisibility: .visible) { Button("断开并清除", role: .destructive) { sync.disconnect() }; Button("取消", role: .cancel) {} } message: { Text("将清除本机同步历史和待发送内容。电脑中心上的记录不受影响。") }
         .alert("同步", isPresented: Binding(get: { sync.notice != nil }, set: { if !$0 { sync.notice = nil } })) { Button("知道了") { sync.notice = nil } } message: { Text(sync.notice ?? "") }
@@ -243,10 +238,7 @@ struct ClipboardSettings: View {
     private func verifyInBrowser() {
         do {
             let url = try ClipboardEndpoint.verificationURL(internet)
-            verificationPending = true
-            openURL(url) { accepted in
-                if !accepted { verificationPending = false; connectionError = "无法打开浏览器，请在 Safari 手动打开已填写的域名后加 /v1/info" }
-            }
+            verificationPage = VerificationPage(url: url)
         } catch { connectionError = error.localizedDescription }
     }
 }

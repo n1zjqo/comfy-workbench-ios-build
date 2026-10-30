@@ -18,7 +18,8 @@ class GPUCoordinator:
 
     def gpu_status(self):
         return {'gpuPolicy': 'comfy_priority' if self.gpu_enabled else 'manual',
-                'gpuPhase': self.gpu_phase, 'gpuError': self.gpu_error}
+                'gpuPhase': self.gpu_phase, 'gpuError': self.gpu_error,
+                'manuallyReleased': self.manually_released}
 
     def comfy_queue_busy(self):
         queue = self.upstream.json('/queue', comfy=True)
@@ -40,7 +41,7 @@ class GPUCoordinator:
         with self.lock:
             self.comfy_requested = True
             self.comfy_worker_reserved = True
-            self.restore_after_comfy = True
+            self.restore_after_comfy = not self.manually_released
             self.comfy_idle_since = None
             if self.maintenance or self.active:
                 self.gpu_phase = 'waiting_strata'
@@ -109,12 +110,18 @@ class GPUCoordinator:
         with self.lock:
             if busy:
                 self.comfy_requested = True
-                self.restore_after_comfy = True
+                self.restore_after_comfy = not self.manually_released
                 self.comfy_idle_since = None
                 return
             if self.maintenance or self.active:
                 return
             if self.comfy_worker_reserved:
+                return
+            if self.manually_released:
+                self.comfy_requested = False
+                self.restore_after_comfy = False
+                self.comfy_idle_since = None
+                self.gpu_phase, self.gpu_error = 'idle', ''
                 return
             if not self.restore_after_comfy:
                 return

@@ -78,6 +78,30 @@ final class UIWorkflowConverterTests: XCTestCase {
         XCTAssertThrowsError(try convert(duplicateOutput, subgraphInfo))
     }
 
+    func testV3ComboMatchesLegacyChoicesAndRemainsEditable() throws {
+        let graph = #"{"nodes":[{"id":33,"type":"ImageScaleToTotalPixels","widgets_values_named":{"upscale_method":"lanczos","megapixels":4,"resolution_steps":1},"outputs":[]}],"links":[]}"#
+        let info = #"{"ImageScaleToTotalPixels":{"output_node":true,"input":{"required":{"upscale_method":["COMBO",{"multiselect":false,"options":["nearest-exact","bilinear","lanczos"]}],"megapixels":["FLOAT"],"resolution_steps":["INT"]}}}}"#
+        let result = try convert(graph, info)
+        XCTAssertEqual(result["33"]?["inputs"]?["upscale_method"], .string("lanczos"))
+        let legacy = info.replacingOccurrences(of: #""COMBO",{"multiselect":false,"options":["nearest-exact","bilinear","lanczos"]}"#, with: #"["nearest-exact","bilinear","lanczos"]"#)
+        XCTAssertEqual(result, try convert(graph, legacy))
+        let unavailable = graph.replacingOccurrences(of: "lanczos", with: "missing-option")
+        let document = try WorkflowDocument(data: UIWorkflowConverter.convert(data: Data(unavailable.utf8), objectInfoData: Data(info.utf8)), objectInfo: ObjectInfo(data: Data(info.utf8)))
+        XCTAssertEqual(document.fields.first(where: { $0.name == "upscale_method" })?.value, .string("missing-option"))
+    }
+
+    func testV3ComboDoesNotAcceptMalformedOrMultiselectValues() {
+        let graph = #"{"nodes":[{"id":1,"type":"Output","widgets_values_named":{"method":"demo"},"outputs":[]}],"links":[]}"#
+        for spec in [#"["COMBO"]"#, #"["COMBO",{"options":{}}]"#, #"["COMBO",{"options":[{}]}]"#, #"["COMBO",{"options":["demo"],"multiselect":true}]"#] {
+            let info = #"{"Output":{"output_node":true,"input":{"required":{"method":SPEC}}}}"#.replacingOccurrences(of: "SPEC", with: spec)
+            XCTAssertThrowsError(try convert(graph, info))
+        }
+        let info = #"{"Output":{"output_node":true,"input":{"required":{"method":["COMBO",{"options":["demo"]}]}}}}"#
+        for value in ["null", "{}", "[]"] {
+            XCTAssertThrowsError(try convert(graph.replacingOccurrences(of: #""method":"demo""#, with: #""method":"# + value), info))
+        }
+    }
+
     private func convert(_ graph: String, _ info: String) throws -> JSONValue {
         try JSONValue(data: UIWorkflowConverter.convert(data: Data(graph.utf8), objectInfoData: Data(info.utf8)))
     }

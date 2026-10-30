@@ -31,3 +31,11 @@ async def workbench_identity(request):
     except (KeyError, ValueError):
         return web.json_response({'error': 'Workbench identity has not been configured'}, status=503)
     return web.json_response({'service': 'comfy-workbench', 'serverId': identity}, headers={'Cache-Control': 'no-store'})
+
+
+@PromptServer.instance.routes.get('/workbench/resources')
+async def workbench_resources(request):
+    # Counts only model handles. Never expose model filenames, paths or prompts.
+    import comfy.model_management as management
+    return web.json_response({'protocolVersion': 1, 'loadedModels': len(management.current_loaded_models)},
+                             headers={'Cache-Control': 'no-store'})

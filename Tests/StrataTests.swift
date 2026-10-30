@@ -22,6 +22,8 @@ final class StrataTests: XCTestCase {
     func testGPUCoordinationStatusKeepsOldBridgeCompatibilityAndManualPausePriority() throws {
         var value = try JSONDecoder().decode(StrataStatus.self, from: Data(state.utf8))
         XCTAssertNil(value.gpuPolicy)
+        XCTAssertNil(value.comfyResources)
+        XCTAssertNil(value.manuallyReleased)
         value.paused = false
         value.gpuPolicy = "comfy_priority"; value.gpuPhase = "comfy"
         XCTAssertTrue(value.title.contains("ComfyUI"))

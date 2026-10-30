@@ -17,6 +17,7 @@ private struct StrataArchive: Codable {
     @Published private(set) var busy = false
     @Published private(set) var chatting = false
     @Published var notice: String?
+    @Published private(set) var controlNotice: String?
     @Published var draft = ""
     @Published var assistantSelected = false
     private let client: StrataClient
@@ -26,6 +27,7 @@ private struct StrataArchive: Codable {
     private var polling: Task<Void, Never>?
     private var draftSave: Task<Void, Never>?
     private var refreshing = false
+    private var statusRevision = 0
     init(storage: URL? = nil, client: StrataClient = StrataClient(), credentialReader: @escaping (String) throws -> String? = { try KeychainStore.password(for: $0) }) {
         self.client = client
         self.credentialReader = credentialReader
@@ -54,6 +56,7 @@ private struct StrataArchive: Codable {
     }
     func configure(lan: String, internet: String, token: String) async {
         guard !busy, !chatting else { return }
+        statusRevision += 1
         busy = true; defer { busy = false }
         do {
             var candidate = profile; candidate.lanURL = lan.trimmingCharacters(in: .whitespacesAndNewlines); candidate.publicURL = internet.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -65,15 +68,22 @@ private struct StrataArchive: Codable {
     }
     func refresh(manual: Bool = false) async {
         guard !profile.serverID.isEmpty, !refreshing, !busy else { return }
+        let revision = statusRevision
         refreshing = true; defer { refreshing = false }
         do {
             let (state, selected) = try await client.status(profile, key: key())
+            guard revision == statusRevision, !busy else { return }
             if status != state { status = state }; if route != selected { route = selected }
             for item in tasks where !item.finished {
                 let next = try await client.task(id: item.id, profile: profile, key: key())
                 update(next)
             }
-        } catch { if manual { notice = error.localizedDescription }; if route != "连接暂不可用" { route = "连接暂不可用" }; if status != nil { status = nil } }
+        } catch {
+            guard revision == statusRevision, !busy else { return }
+            if manual { notice = error.localizedDescription }
+            if route != "连接暂不可用" { route = "连接暂不可用" }
+            if status != nil { status = nil }
+        }
     }
     func resume() {
         guard polling == nil else { return }
@@ -87,8 +97,20 @@ private struct StrataArchive: Codable {
     func background() { polling?.cancel(); polling = nil; draftSave?.cancel(); save() }
     func control(_ action: String) async {
         guard !busy else { return }; busy = true; defer { busy = false }
-        do { status = try await client.control(action, profile: profile, key: key()) }
-        catch { notice = error.localizedDescription; status = nil }
+        statusRevision += 1
+        controlNotice = "正在提交操作…"
+        do {
+            let result = try await client.control(action, profile: profile, key: key())
+            status = result
+            switch action {
+            case "release":
+                if !result.online { controlNotice = "操作已返回，但推理服务暂时不可达，尚不能确认卸载状态。" }
+                else { controlNotice = result.loaded ? "服务器仍显示模型已加载，请刷新状态确认。" : "Strata 已卸载；下次对话可自动加载。" }
+            case "free_comfy": controlNotice = result.comfyResources?.loadedModels == 0 ? "ComfyUI 驻留模型已卸载；整卡占用还包含 Strata 和桌面。" : "已提交 ComfyUI 释放请求，请刷新确认；整卡占用还包含其他程序。"
+            case "pause": controlNotice = result.loaded ? "已暂停接收，等待当前任务结束后卸载。" : "已暂停并卸载，需手动恢复。"
+            default: controlNotice = result.loaded ? "模型已加载。" : "操作已完成，请查看当前状态。"
+            }
+        } catch { controlNotice = "操作未能确认：" + error.localizedDescription; status = nil }
     }
     func send(image: UIImage?) {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)

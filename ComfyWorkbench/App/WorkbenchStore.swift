@@ -46,6 +46,7 @@ private struct SavedState: Codable {
     @Published var importStatus: String?
     @Published var verificationRequired: ServerConfig?
     @Published var verificationPage: VerificationPage?
+    @Published var verificationInSettings = false
     private var failedConnection: (config: ServerConfig, password: String)?
     private var browserAttempt: (config: ServerConfig, password: String)?
     var clientID = UUID().uuidString
@@ -337,7 +338,7 @@ private struct SavedState: Codable {
         return true
     }
 
-    func beginVerification(config: ServerConfig, password: String? = nil) {
+    func beginVerification(config: ServerConfig, password: String? = nil, inSettings: Bool = false) {
         guard !busy, verificationPage == nil else { return }
         do {
             var verification = config
@@ -348,11 +349,13 @@ private struct SavedState: Codable {
             let storedPassword = try KeychainStore.password(for: config.passwordKey)
             browserAttempt = (config, password ?? saved ?? storedPassword ?? "")
             pauseMonitoring()
-            verificationPage = VerificationPage(url: url)
+            verificationInSettings = inSettings
+            verificationPage = VerificationPage(url: url.appendingPathComponent("workbench/identity"))
         } catch { self.error = error.localizedDescription }
     }
 
     func finishVerification() async {
+        verificationInSettings = false
         guard let attempt = browserAttempt else { return }
         browserAttempt = nil
         connectionStatus = "正在检查验证结果…"

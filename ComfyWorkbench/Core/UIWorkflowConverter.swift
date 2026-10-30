@@ -390,13 +390,23 @@ public enum UIWorkflowConverter {
                 return
             }
             guard let type = first.stringValue else { throw invalidValue(node, key) }
+            if type == "COMBO" {
+                // V3 nodes name the widget type and put choices in schema[1].options.
+                // Keep unavailable scalar selections editable, as with legacy combo arrays.
+                let options = rule.schema.count > 1 ? rule.schema[1] : .null
+                guard options["multiselect"]?.boolValue != true,
+                      let choices = options["options"]?.arrayValue,
+                      choices.allSatisfy({ $0.isScalar && $0 != .null }),
+                      value.isScalar, value != .null else { throw invalidValue(node, key) }
+                return
+            }
             let types = type.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             let valid = types.contains { item in
                 switch item {
                 case "STRING": return value.stringValue != nil
-                case "BOOLEAN": return value.boolValue != nil
+                case "BOOLEAN", "BOOL": return value.boolValue != nil
                 case "INT": return value.integerValue != nil || value.uint64Value != nil
-                case "FLOAT": return value.doubleValue != nil
+                case "FLOAT", "NUMBER": return value.doubleValue != nil
                 case "*": return value.isScalar && value != .null
                 default: return false
                 }

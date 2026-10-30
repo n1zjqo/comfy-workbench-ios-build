@@ -14,7 +14,7 @@
     <key>LSRequiresIPhoneOS</key><true/>
     <key>MinimumOSVersion</key><string>15.0</string>
     <key>NSLocalNetworkUsageDescription</key><string>连接你的 ComfyUI 服务器，读取工作流参数、提交生成任务并显示结果。</string>
-    <key>NSPhotoLibraryAddUsageDescription</key><string>在你选择保存作品时，将图片或视频存入相册。</string>
+    <key>NSPhotoLibraryAddUsageDescription</key><string>在你选择保存时，将作品或验证页面截图存入相册。</string>
     <key>NSAppTransportSecurity</key>
     <dict><key>NSAllowsArbitraryLoads</key><true/></dict>
     <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>

@@ -50,7 +50,7 @@ struct WorkbenchView: View {
             Button("知道了", role: .cancel) { store.error = nil; strata.notice = nil }
         } message: { Text(store.error ?? strata.notice ?? "") }
         .onChange(of: store.activeTab) { _ in clean = false }
-        .sheet(item: $store.verificationPage, onDismiss: { Task { await store.finishVerification() } }) { page in
+        .sheet(item: Binding(get: { store.verificationInSettings ? nil : store.verificationPage }, set: { store.verificationPage = $0 }), onDismiss: { Task { await store.finishVerification() } }) { page in
             VerificationBrowser(url: page.url) { store.verificationPage = nil }.ignoresSafeArea()
         }
     }
@@ -207,19 +207,22 @@ struct ConnectionPage: View {
                 Text("离开 App 后，已提交的任务继续在服务器上运行。回到 App 会重新查询队列与结果。").font(.subheadline).foregroundColor(.secondary)
                 VStack(alignment: .leading, spacing: 12) {
                     Label("外网访问 · DDNSTO", systemImage: "globe").font(.headline)
-                    Text("在上方填写你的 HTTPS 域名。需要登录验证时，打开网页完成验证，再点“完成”返回。").font(.subheadline).foregroundColor(.secondary)
+                    Text("打开官方验证页查看二维码；验证完成后点“完成检查”返回。").font(.subheadline).foregroundColor(.secondary)
                     Button {
-                        store.beginVerification(config: ServerConfig(baseURL: address, username: username, passwordKey: key, publicURL: internet.isEmpty ? nil : internet, serviceID: store.server?.serviceID), password: password)
+                        store.beginVerification(config: ServerConfig(baseURL: address, username: username, passwordKey: key, publicURL: internet.isEmpty ? nil : internet, serviceID: store.server?.serviceID), password: password, inSettings: true)
                     } label: { Label("打开网页验证", systemImage: "arrow.up.forward.app").frame(maxWidth: .infinity, minHeight: 44) }
                     .buttonStyle(.bordered).disabled(store.busy || address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     Text("返回后只检查连接和查询任务。更换网络后可能需要再次验证；网页和 App 应使用相同网络出口。").font(.caption).foregroundColor(.secondary)
                 }.padding(20).glass()
                 Divider()
                 Text("Comfy Workbench for iOS").font(.headline)
-                Text("0.6.2 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
+                Text("0.6.3 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
             }.padding(24)
         }.onAppear {
             if let config = store.server { address = config.baseURL; internet = config.publicURL ?? ""; username = config.username; key = config.passwordKey; password = (try? KeychainStore.password(for: key)) ?? "" }
+        }
+        .sheet(item: Binding(get: { store.verificationInSettings ? store.verificationPage : nil }, set: { store.verificationPage = $0 }), onDismiss: { Task { await store.finishVerification() } }) { page in
+            VerificationBrowser(url: page.url) { store.verificationPage = nil }
         }
     }
 }
