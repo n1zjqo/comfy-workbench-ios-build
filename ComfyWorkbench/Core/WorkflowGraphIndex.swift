@@ -87,12 +87,13 @@ struct WorkflowGraphIndex {
     /// Follow control wires only through known passive collectors/reroutes.
     func connected(_ key: String, upstream: Bool = true) throws -> [String] {
         guard let entry = entries[key] else { return [] }
-        let links = (graphs[entry.scope]?["links"]?.arrayValue ?? []).sorted { a, b in
-            let slot = upstream ? 4 : 2
-            let name = upstream ? "target_slot" : "origin_slot"
-            return (a.arrayValue.flatMap { $0.count > slot ? $0[slot].integerValue : nil } ?? a[name]?.integerValue ?? 0)
-                < (b.arrayValue.flatMap { $0.count > slot ? $0[slot].integerValue : nil } ?? b[name]?.integerValue ?? 0)
+        func slotNumber(_ link: JSONValue) -> Int64 {
+            let position = upstream ? 4 : 2
+            if let array = link.arrayValue, array.count > position { return array[position].integerValue ?? 0 }
+            return link[upstream ? "target_slot" : "origin_slot"]?.integerValue ?? 0
         }
+        let rawLinks: [JSONValue] = graphs[entry.scope]?["links"]?.arrayValue ?? []
+        let links = rawLinks.sorted { slotNumber($0) < slotNumber($1) }
         var result: [String] = [], seen = Set<String>(), walked = Set<String>()
         func walk(_ current: String, path: Set<String>) throws {
             guard path.count < 512, !path.contains(current) else { throw WorkflowError.invalid("开关连接存在循环。") }
