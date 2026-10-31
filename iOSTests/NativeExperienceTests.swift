@@ -26,7 +26,7 @@ final class NativeExperienceTests: XCTestCase {
         restored.redoEdit(); XCTAssertFalse(try XCTUnwrap(restored.canvas?.groupSwitches.first).enabled)
         let window = try host(ApplicationPanel { _ in }.environmentObject(restored).padding(20).background(Palette.workspace).preferredColorScheme(.dark))
         defer { window.isHidden = true }
-        try capturePreview(window, name: "generic-nested-controls")
+        try capturePreview(window, name: "reference-nested-controls")
     }
     @MainActor func testGroupPanelSwitchPersistsAndUndoRestoresMixedModes() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -850,4 +850,3 @@ private final class DelayedStrataProtocol: URLProtocol {
     }
     static func reset() { releaseOldStatus(); lock.lock(); posts = 0; lock.unlock() }
 }
-
