@@ -174,7 +174,7 @@ struct JobBubble: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack { Text("你").font(.caption2.weight(.semibold)); Spacer(); Text(job.date, style: .time).font(.caption2).foregroundColor(.secondary) }
                     Text(job.message).font(.subheadline).lineLimit(expandedPrompt ? nil : 3).textSelection(.enabled)
-                    if job.message.count > 110 {
+                    if job.message.count > 40 || job.message.contains("\n") {
                         Button(expandedPrompt ? "收起" : "展开全文") { expandedPrompt.toggle() }.font(.caption).frame(minHeight: 32)
                     }
                 }.padding(12).background(Color(red: 0.32, green: 0.59, blue: 0.59).opacity(0.22), in: RoundedRectangle(cornerRadius: 17)).glass(17)
