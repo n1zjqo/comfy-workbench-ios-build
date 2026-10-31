@@ -18,7 +18,7 @@ struct WorkflowPage: View {
         let available = store.canvas?.fields ?? []
         let base = allParameters ? available : store.panelItems.compactMap { item in available.first { $0.id == item.id } }
         guard allParameters, !search.isEmpty else { return base }
-        return base.filter { "\($0.name) \($0.nodeType) \($0.nodeID)".localizedCaseInsensitiveContains(search) }
+        return base.filter { "\($0.title) \($0.nodeType) \($0.nodeID)".localizedCaseInsensitiveContains(search) }
     }
     var body: some View {
         ScrollView {
@@ -78,7 +78,11 @@ struct WorkflowPage: View {
                     if allParameters {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(fields) { field in
+                                if store.canvas?.groupSwitches.contains(where: { $0.id == field.id }) == true {
+                                    WorkflowGroupSwitchRow(field: field)
+                                } else {
                                 Button { editing = field } label: { ParameterRow(field: field) }.buttonStyle(.plain)
+                                }
                                 Divider().padding(.leading, 16)
                             }
                         }.background(Palette.surface, in: RoundedRectangle(cornerRadius: 18)).clipShape(RoundedRectangle(cornerRadius: 18))
@@ -151,7 +155,7 @@ struct ParameterRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(field.name).font(.system(size: 15, weight: .medium)).foregroundColor(.white)
+                Text(field.title).font(.system(size: 15, weight: .medium)).foregroundColor(.white)
                 Text("\(field.nodeType)  #\(field.nodeID)").font(.caption2).foregroundColor(.white.opacity(0.48))
                 if field.schema.multiline { Text(field.value.displayValue.isEmpty ? "添加提示词" : field.value.displayValue).font(.subheadline).foregroundColor(.white.opacity(0.75)).lineLimit(3).padding(.top, 5) }
             }

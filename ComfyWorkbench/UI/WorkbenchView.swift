@@ -5,16 +5,17 @@ struct WorkbenchView: View {
     @EnvironmentObject var store: WorkbenchStore
     @EnvironmentObject var strata: StrataStore
     @State private var clean = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    init(initiallyClean: Bool = false) { _clean = State(initialValue: initiallyClean) }
     var body: some View {
         ZStack {
             if store.activeTab == 0 && !strata.assistantSelected {
-                if clean, store.background != nil { Color.black.ignoresSafeArea() }
-                else { ArtworkBackground(image: store.background) }
+                ArtworkBackground(image: store.background)
             } else {
                 Palette.workspace.ignoresSafeArea()
             }
             VStack(spacing: 0) {
-                if let config = store.verificationRequired, !clean, [0, 1, 3].contains(store.activeTab) {
+                if let config = store.verificationRequired, [0, 1, 3].contains(store.activeTab) {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("需要网页验证").font(.subheadline.weight(.semibold))
@@ -33,7 +34,7 @@ struct WorkbenchView: View {
                     default: PlacesConnectionPage()
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                if !clean {
+                Group {
                     HStack(spacing: 0) {
                         tab(0, "创作", "bubble.left.and.bubble.right")
                         tab(1, "应用", "slider.horizontal.3")
@@ -43,16 +44,31 @@ struct WorkbenchView: View {
                     }.padding(.vertical, 5).glass(25).padding(.horizontal, 16).padding(.bottom, 6)
                 }
             }
+            .offset(x: clean ? UIScreen.main.bounds.width + 40 : 0).opacity(clean ? 0 : 1)
+            .allowsHitTesting(!clean).accessibilityHidden(clean)
+            if clean {
+                Color.clear.contentShape(Rectangle()).ignoresSafeArea()
+                    .gesture(DragGesture(minimumDistance: 25).onEnded { value in
+                        if value.translation.width < -65 && abs(value.translation.width) > abs(value.translation.height) * 1.7 { restoreChat() }
+                    })
+                    .onTapGesture(count: 2, perform: restoreChat)
+                    .accessibilityLabel("聊天背景，向左滑动或双击恢复聊天")
+                    .accessibilityAction(.escape) { restoreChat() }
+                    .accessibilityIdentifier("clean-chat-background")
+            }
         }
         .statusBar(hidden: clean)
         .tint(Palette.paper)
-        .alert("提示", isPresented: Binding(get: { store.error != nil || strata.notice != nil }, set: { if !$0 { store.error = nil; strata.notice = nil } })) {
+        .alert("提示", isPresented: Binding(get: { !clean && (store.error != nil || strata.notice != nil) }, set: { if !$0 && !clean { store.error = nil; strata.notice = nil } })) {
             Button("知道了", role: .cancel) { store.error = nil; strata.notice = nil }
         } message: { Text(store.error ?? strata.notice ?? "") }
         .onChange(of: store.activeTab) { _ in clean = false }
         .sheet(item: Binding(get: { store.verificationInSettings ? nil : store.verificationPage }, set: { store.verificationPage = $0 }), onDismiss: { Task { await store.finishVerification() } }) { page in
             VerificationBrowser(url: page.url) { store.verificationPage = nil }.ignoresSafeArea()
         }
+    }
+    private func restoreChat() {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.9)) { clean = false }
     }
     private func tab(_ index: Int, _ title: String, _ icon: String) -> some View {
         Button { store.activeTab = index } label: {
@@ -69,16 +85,12 @@ struct ChatView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var clean: Bool
     @State private var message = ""
-    @State private var artworkZoomed = false
     @State private var expandedInput = false
     @GestureState private var drag: CGFloat = 0
     @FocusState private var focused: Bool
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                if clean, let image = store.background {
-                    FittedArtwork(image: image, isZoomed: $artworkZoomed).ignoresSafeArea()
-                }
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 5) {
@@ -128,11 +140,6 @@ struct ChatView: View {
                 .offset(x: clean ? geo.size.width + 30 : max(0, drag))
                 .opacity(clean ? 0 : 1 - Double(max(0, drag) / (geo.size.width * 1.4)))
                 .allowsHitTesting(!clean).accessibilityHidden(clean)
-                if clean {
-                    VStack { Spacer(); Button { toggleClean(false) } label: {
-                        Image(systemName: "chevron.left").font(.system(size: 14, weight: .medium)).frame(width: 44, height: 44).glass(22)
-                    }.accessibilityLabel("恢复聊天").padding(.bottom, 22) }
-                }
             }
             .contentShape(Rectangle())
             .simultaneousGesture(DragGesture(minimumDistance: 28)
@@ -140,7 +147,7 @@ struct ChatView: View {
                     if !focused && !clean && abs(value.translation.width) > abs(value.translation.height) * 1.7 { state = max(0, value.translation.width) }
                 }
                 .onEnded { value in
-                    guard !focused, !artworkZoomed, abs(value.translation.width) > abs(value.translation.height) * 1.7 else { return }
+                    guard !focused, abs(value.translation.width) > abs(value.translation.height) * 1.7 else { return }
                     if !clean && value.translation.width > 85 { toggleClean(true) }
                     else if clean && value.translation.width < -65 { toggleClean(false) }
                 })
@@ -152,7 +159,6 @@ struct ChatView: View {
     }
     private func toggleClean(_ value: Bool) {
         focused = false
-        artworkZoomed = false
         withAnimation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.9)) { clean = value }
     }
 }
@@ -160,25 +166,38 @@ struct ChatView: View {
 struct JobBubble: View {
     @EnvironmentObject var store: WorkbenchStore
     let job: GenerationJob
+    @State private var expandedPrompt = false
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack {
-                Text(job.name).font(.caption.weight(.semibold)).lineLimit(1)
-                Spacer(); Text(job.date, style: .time).font(.caption2).foregroundColor(.secondary)
+                Spacer(minLength: 48)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack { Text("你").font(.caption2.weight(.semibold)); Spacer(); Text(job.date, style: .time).font(.caption2).foregroundColor(.secondary) }
+                    Text(job.message).font(.subheadline).lineLimit(expandedPrompt ? nil : 3).textSelection(.enabled)
+                    if job.message.count > 110 {
+                        Button(expandedPrompt ? "收起" : "展开全文") { expandedPrompt.toggle() }.font(.caption).frame(minHeight: 32)
+                    }
+                }.padding(12).background(Color(red: 0.32, green: 0.59, blue: 0.59).opacity(0.22), in: RoundedRectangle(cornerRadius: 17)).glass(17)
+                    .contextMenu { Button("复制完整提示词") { UIPasteboard.general.string = job.message } }
             }
-            Text(job.message).font(.subheadline).lineLimit(5).textSelection(.enabled)
-            Divider().overlay(.white.opacity(0.2))
             HStack {
-                if !job.finished { ProgressView().scaleEffect(0.7) }
-                Text(job.state).font(.caption)
-                Spacer()
-                if !job.finished { Button("取消排队") { Task { await store.cancel(job) } }.font(.caption).frame(minHeight: 44) }
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack(spacing: 6) {
+                        Text("ComfyUI").font(.caption2.weight(.semibold))
+                        if !job.finished { ProgressView().scaleEffect(0.7) }
+                        Text(job.state).font(.caption2).foregroundColor(.secondary)
+                        Spacer(minLength: 0)
+                        if !job.finished { Button("取消排队") { Task { await store.cancel(job) } }.font(.caption2).frame(minHeight: 32) }
+                    }
+                    Text(job.name).font(.caption2).foregroundColor(.secondary).lineLimit(1)
+                    if job.progress > 0 && !job.finished { ProgressView(value: job.progress) }
+                    ForEach(job.text.indices, id: \.self) { i in Text(job.text[i]).font(.subheadline).textSelection(.enabled) }
+                    if !job.outputs.isEmpty { OutputStrip(job: job, compact: true) }
+                    if let detail = job.detail { Text(detail).font(.caption2).foregroundColor(.white.opacity(0.65)).lineLimit(4) }
+                }.padding(12).glass(17)
+                Spacer(minLength: 48)
             }
-            if job.progress > 0 && !job.finished { ProgressView(value: job.progress) }
-            ForEach(job.text.indices, id: \.self) { i in Text(job.text[i]).font(.subheadline).textSelection(.enabled) }
-            if !job.outputs.isEmpty { OutputStrip(job: job) }
-            if let detail = job.detail { Text(detail).font(.caption2).foregroundColor(.white.opacity(0.65)).lineLimit(4) }
-        }.padding(17).glass(22)
+        }.accessibilityIdentifier("generation-exchange")
     }
 }
 
@@ -220,7 +239,7 @@ struct ConnectionPage: View {
                 }.padding(20).glass()
                 Divider()
                 Text("Comfy Workbench for iOS").font(.headline)
-                Text("0.6.4 · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
+                Text("\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · iOS 15.0+\n参考 Mimikkoro1/comfy-workbench-android\nGPL-3.0 · 非官方客户端").font(.caption).foregroundColor(.secondary)
             }.padding(24)
         }.onAppear {
             if let config = store.server { address = config.baseURL; internet = config.publicURL ?? ""; username = config.username; key = config.passwordKey; password = (try? KeychainStore.password(for: key)) ?? "" }

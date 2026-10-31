@@ -46,7 +46,7 @@ public enum UIWorkflowConverter {
         var visiting = Set<String>()
 
         // These are frontend-only controls in the supplied workflow, with no execution output.
-        let decorations: Set<String> = ["Note", "MarkdownNote", "忽略多组孤海", "Label (rgthree)", "Fast Groups Bypasser (rgthree)"]
+        let decorations: Set<String> = ["Note", "MarkdownNote", "忽略多组孤海", "Label (rgthree)", "Fast Groups Bypasser (rgthree)", "Fast Groups Muter (rgthree)"]
         let virtualTypes: Set<String> = ["SetNode", "GetNode", "Reroute"]
         let frontendWidgets: Set<String> = [
             "upload", "choose video to upload", "videopreview", "preview", "control_after_generate"

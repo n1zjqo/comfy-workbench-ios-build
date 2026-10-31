@@ -213,6 +213,12 @@ private struct SavedState: Codable {
     }
     func edit(_ field: WorkflowField, text: String) throws {
         guard let current = canvas?.fields.first(where: { $0.id == field.id }) else { throw WorkflowError.invalid("找不到这个参数。") }
+        if let graph = canvas, graph.groupSwitches.contains(where: { $0.id == current.id }) {
+            guard let enabled = try current.parsedValue(from: text).boolValue else { throw WorkflowError.invalid("请选择分组开关状态。") }
+            let modes = try graph.groupModeChange(fieldID: current.id, enabled: enabled)
+            try commit(WorkflowChange(kind: .groupModes, fieldID: current.id, label: current.title, before: modes.before, after: modes.after))
+            return
+        }
         let change = WorkflowChange(kind: .parameter, fieldID: current.id, label: current.name, before: current.value, after: try current.parsedValue(from: text))
         try commit(change)
     }
@@ -276,6 +282,11 @@ private struct SavedState: Codable {
     private func applying(_ change: WorkflowChange, value: JSONValue, to item: SavedWorkflow) throws -> SavedWorkflow {
         var item = item
         switch change.kind {
+        case .groupModes:
+            let info = try objectInfoData.map { try ObjectInfo(data: $0) }
+            var graph = try WorkflowCanvas(data: item.data, objectInfo: info, widgetOrder: item.canvasWidgetOrder ?? [:])
+            try graph.restoreGroupModes(value)
+            item.data = try graph.data(); item.canvasWidgetOrder = graph.widgetOrder
         case .parameter:
             guard let id = change.fieldID else { throw WorkflowError.invalid("编辑记录不完整。") }
             let info = try objectInfoData.map { try ObjectInfo(data: $0) }

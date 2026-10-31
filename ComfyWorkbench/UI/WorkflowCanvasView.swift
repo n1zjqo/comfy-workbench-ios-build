@@ -112,17 +112,25 @@ struct WorkflowCanvasView: View {
             Divider().overlay(.white.opacity(0.08))
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    if node.fields.isEmpty { Text("这个节点没有可直接编辑的参数。可以定位上游节点修改输入。").font(.subheadline).foregroundColor(.secondary).padding(18) }
+                    if let issue = store.canvas?.groupSwitchIssues[node.id] {
+                        Text(issue).font(.subheadline).foregroundColor(.secondary).padding(18)
+                    } else if node.fields.isEmpty {
+                        Text(WorkflowGroupSwitch.controllerTypes.contains(node.type) ? "没有匹配的分组，请检查此节点的名称或颜色筛选规则。" : "这个节点没有可直接编辑的参数。可以定位上游节点修改输入。").font(.subheadline).foregroundColor(.secondary).padding(18)
+                    }
                     ForEach(node.fields) { field in
+                        if store.canvas?.groupSwitches.contains(where: { $0.id == field.id }) == true {
+                            WorkflowGroupSwitchRow(field: field)
+                        } else {
                         Button { editing = field } label: {
                             HStack(alignment: .top, spacing: 12) {
                                 VStack(alignment: .leading, spacing: 5) {
-                                    Text(field.name).font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.9))
+                                    Text(field.title).font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.9))
                                     Text(field.value.displayValue.isEmpty ? "未填写" : field.value.displayValue).font(.system(size: 13)).foregroundColor(.white.opacity(0.52)).lineLimit(field.schema.multiline ? 3 : 1)
                                 }
                                 Spacer(minLength: 8); Image(systemName: "pencil").font(.system(size: 12)).foregroundColor(.white.opacity(0.55))
                             }.padding(.vertical, 13).padding(.horizontal, 18).frame(maxWidth: .infinity, minHeight: 54, alignment: .leading).contentShape(Rectangle())
                         }.buttonStyle(.plain).disabled(store.busy)
+                        }
                         Divider().padding(.leading, 18)
                     }
                     let adjacent = (store.canvas?.links ?? []).filter { $0.target == node.id || $0.source == node.id }

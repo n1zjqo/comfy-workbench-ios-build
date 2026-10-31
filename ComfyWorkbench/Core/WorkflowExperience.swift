@@ -53,7 +53,7 @@ public struct PanelFieldConfiguration: Codable, Identifiable, Equatable {
     public var step: Double?
     public var choices: [String] = []
     public init(id: String) { self.id = id }
-    public func title(for field: WorkflowField) -> String { label.isEmpty ? field.name : label }
+    public func title(for field: WorkflowField) -> String { label.isEmpty ? field.title : label }
     public func sliderRange(for field: WorkflowField) -> ClosedRange<Double>? {
         guard field.schema.kind == .integer || field.schema.kind == .decimal,
               !field.name.lowercased().contains("seed"),
@@ -91,7 +91,7 @@ public struct PanelFieldConfiguration: Codable, Identifiable, Equatable {
 }
 
 public struct WorkflowChange: Codable, Equatable {
-    public enum Kind: String, Codable { case parameter, panel, prompt, randomSeeds, referenceMode, reference }
+    public enum Kind: String, Codable { case parameter, panel, prompt, randomSeeds, referenceMode, reference, groupModes }
     public var kind: Kind
     public var fieldID: String?
     public var label: String

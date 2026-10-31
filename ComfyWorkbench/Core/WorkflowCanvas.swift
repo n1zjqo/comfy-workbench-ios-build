@@ -27,6 +27,8 @@ public struct WorkflowCanvas {
     public private(set) var root: JSONValue
     public private(set) var nodes: [CanvasNode] = []
     public private(set) var links: [CanvasLink] = []
+    public private(set) var groupSwitches: [WorkflowGroupSwitch] = []
+    public private(set) var groupSwitchIssues: [String: String] = [:]
     public private(set) var widgetOrder: [String: [String]]
     public let originalLayout: Bool
     private let info: ObjectInfo?
@@ -64,7 +66,10 @@ public struct WorkflowCanvas {
                 if object["type"]?.stringValue != nil && object["id"] != nil { object.removeValue(forKey: "title") }
                 if let nodes = object["nodes"]?.arrayValue {
                     object["nodes"] = .array(nodes.filter { !Self.decorations.contains($0["type"]?.stringValue ?? "") })
-                    object.removeValue(forKey: "groups")
+                    // These groups are functional: the frontend controller selects them by title/color.
+                    if !nodes.contains(where: { WorkflowGroupSwitch.controllerTypes.contains($0["type"]?.stringValue ?? "") }) {
+                        object.removeValue(forKey: "groups")
+                    }
                     let retained = Set((object["nodes"]?.arrayValue ?? []).compactMap { $0["id"]?.displayValue })
                     if let links = object["links"]?.arrayValue {
                         object["links"] = .array(links.filter {
@@ -87,6 +92,45 @@ public struct WorkflowCanvas {
         return Data(try encode(root).utf8)
     }
     public var fields: [WorkflowField] { nodes.flatMap(\.fields) }
+    public func groupModeChange(fieldID: String, enabled: Bool) throws -> (before: JSONValue, after: JSONValue) {
+        guard let control = groupSwitches.first(where: { $0.id == fieldID }), !control.nodeIDs.isEmpty else {
+            throw WorkflowError.invalid("这个分组没有可切换的节点，请重新导入带分组的画布 JSON。")
+        }
+        let siblings = groupSwitches.filter { $0.controllerID == control.controllerID }
+        var target = enabled
+        if !target && control.restriction == "always one" && !siblings.contains(where: { $0.id != control.id && $0.enabled }) { target = true }
+        var changes: [String: JSONValue] = [:]
+        if target && ["max one", "always one"].contains(control.restriction) {
+            for sibling in siblings { for id in sibling.nodeIDs { changes[id] = .integer(sibling.offMode) } }
+        }
+        for id in control.nodeIDs { changes[id] = .integer(target ? 0 : control.offMode) }
+        let raw = root["nodes"]?.arrayValue ?? []
+        let before = Dictionary(uniqueKeysWithValues: raw.compactMap { node -> (String, JSONValue)? in
+            guard let id = node["id"]?.displayValue, changes[id] != nil else { return nil }
+            return (id, node["mode"] ?? .null)
+        })
+        guard before.values.allSatisfy({ $0 == .null || [Int64(0), 2, 4].contains($0.integerValue ?? -1) }) else {
+            throw WorkflowError.invalid("分组内有不支持的运行模式，无法保证撤销恢复。")
+        }
+        return (.object(before), .object(changes))
+    }
+    public mutating func restoreGroupModes(_ snapshot: JSONValue) throws {
+        guard originalLayout, let modes = snapshot.objectValue, !modes.isEmpty,
+              var object = root.objectValue, var rawNodes = object["nodes"]?.arrayValue else { throw WorkflowError.invalid("分组切换记录不完整。") }
+        let ids = Set(rawNodes.compactMap { $0["id"]?.displayValue })
+        guard Set(modes.keys).isSubset(of: ids), modes.values.allSatisfy({ $0 == .null || [Int64(0), 2, 4].contains($0.integerValue ?? -1) }) else {
+            throw WorkflowError.invalid("分组节点或运行模式已变化，无法应用此记录。")
+        }
+        for index in rawNodes.indices {
+            guard var node = rawNodes[index].objectValue, let id = node["id"]?.displayValue, let mode = modes[id] else { continue }
+            if mode == .null { node.removeValue(forKey: "mode") } else { node["mode"] = mode }
+            rawNodes[index] = .object(node)
+        }
+        object["nodes"] = .array(rawNodes)
+        let previous = root
+        do { root = .object(object); try loadUI() }
+        catch { root = previous; try? loadUI(); throw error }
+    }
     public func referenceMode(nodeID: String) -> JSONValue? {
         guard originalLayout, nodes.first(where: { $0.id == nodeID })?.fields.contains(where: { $0.schema.isUpload }) == true,
               let node = root["nodes"]?.arrayValue?.first(where: { $0["id"]?.displayValue == nodeID }) else { return nil }
@@ -116,6 +160,12 @@ public struct WorkflowCanvas {
     }
     public mutating func update(fieldID: String, value: JSONValue) throws {
         guard let field = fields.first(where: { $0.id == fieldID }) else { throw WorkflowError.invalid("找不到这个参数。") }
+        if groupSwitches.contains(where: { $0.id == fieldID }) {
+            guard let enabled = value.boolValue else { throw WorkflowError.invalid("分组开关需要 true 或 false。") }
+            let change = try groupModeChange(fieldID: fieldID, enabled: enabled)
+            try restoreGroupModes(change.after)
+            return
+        }
         // Reuse the API editor's exact type/range validation, including UInt64 seeds.
         let validationJSON = JSONValue.object([field.nodeID: .object(["class_type": .string(field.nodeType), "inputs": .object([field.name: field.value])])])
         var validation = try WorkflowDocument(data: validationJSON.data(), objectInfo: info)
@@ -153,6 +203,12 @@ public struct WorkflowCanvas {
         guard let rawNodes = root["nodes"]?.arrayValue, !rawNodes.isEmpty, rawNodes.count <= 3000 else { throw WorkflowError.invalid("画布需包含 1–3000 个节点。") }
         var seen = Set<String>()
         var result: [CanvasNode] = []
+        groupSwitches = []; groupSwitchIssues = [:]
+        for node in rawNodes where WorkflowGroupSwitch.controllerTypes.contains(node["type"]?.stringValue ?? "") {
+            guard let id = node["id"]?.displayValue else { continue }
+            do { groupSwitches += try WorkflowGroupSwitch.controls(root: root, controller: node) }
+            catch { groupSwitchIssues[id] = error.localizedDescription }
+        }
         for (index, value) in rawNodes.enumerated() {
             guard let raw = value.objectValue, let id = raw["id"]?.displayValue, !id.isEmpty,
                   let type = raw["type"]?.stringValue, !type.isEmpty, seen.insert(id).inserted else { throw WorkflowError.invalid("画布存在缺失或重复的节点编号。") }
@@ -190,6 +246,13 @@ public struct WorkflowCanvas {
             if type == "Seed (rgthree)" {
                 let buttons: Set<String> = ["🎲 Randomize Each Time", "🎲 New Fixed Random", "USE_LAST_SEED"]
                 fields.removeAll { buttons.contains($0.name) && info?.schema(for: type, input: $0.name) == nil }
+            }
+            if WorkflowGroupSwitch.controllerTypes.contains(type) {
+                fields = groupSwitches.filter { $0.controllerID == id }.map { control in
+                    var field = WorkflowField(nodeID: id, nodeType: type, name: control.fieldName, value: .bool(control.enabled), schema: .init(kind: .boolean))
+                    field.displayName = control.title
+                    return field
+                }
             }
             result.append(CanvasNode(id: id, type: type, x: position.0, y: position.1, width: size.0,
                                      height: raw["flags"]?["collapsed"]?.boolValue == true ? 34 : size.1,
@@ -274,6 +337,130 @@ public struct WorkflowCanvas {
         ]
         if let known = names[type], known.count == count || (type == "LoadImage" && count == 1) { return Array(known.prefix(count)) }
         return (0..<count).map { "参数 \($0 + 1)" }
+    }
+}
+
+/// Frontend group controls change node modes, never API widget values.
+public struct WorkflowGroupSwitch: Identifiable, Equatable {
+    public static let controllerTypes: Set<String> = ["Fast Groups Bypasser (rgthree)", "Fast Groups Muter (rgthree)"]
+    public let controllerID: String
+    public let fieldName: String
+    public let title: String
+    public let color: String?
+    public let nodeIDs: [String]
+    public let activeCount: Int
+    public let offMode: Int64
+    public let restriction: String
+    public var id: String { controllerID + "." + fieldName }
+    // rgthree uses any active member to display an enabled group.
+    public var enabled: Bool { activeCount > 0 }
+    public var partiallyEnabled: Bool { activeCount > 0 && activeCount < nodeIDs.count }
+    public var status: String {
+        if nodeIDs.isEmpty { return "分组内没有节点" }
+        if partiallyEnabled { return "部分启用（\(activeCount)/\(nodeIDs.count)）" }
+        return enabled ? "已启用 · \(nodeIDs.count) 个节点" : (offMode == 4 ? "已旁路" : "已停用") + " · \(nodeIDs.count) 个节点"
+    }
+
+    fileprivate static func controls(root: JSONValue, controller: JSONValue) throws -> [WorkflowGroupSwitch] {
+        guard let controllerID = controller["id"]?.displayValue else { return [] }
+        let properties = controller["properties"]
+        let restriction = properties?["toggleRestriction"]?.stringValue ?? "default"
+        guard ["default", "max one", "always one"].contains(restriction) else { throw WorkflowError.invalid("此分组开关的限制规则尚不支持，请在 ComfyUI 中设置。") }
+        let subgraphs = root["definitions"]?["subgraphs"]?.arrayValue ?? []
+        if properties?["showAllGraphs"]?.boolValue != false && subgraphs.contains(where: { !($0["groups"]?.arrayValue ?? []).isEmpty }) {
+            throw WorkflowError.invalid("此开关包含子图分组，目前请在 ComfyUI 中切换后重新导入；手机不会猜测子图归属。")
+        }
+        let rawGroups = root["groups"]?.arrayValue ?? []
+        guard !rawGroups.isEmpty else { throw WorkflowError.invalid("缺少分组信息。请从 ComfyUI 重新导入画布 JSON，API JSON 不含分组开关。") }
+        guard rawGroups.count <= 1000 else { throw WorkflowError.invalid("分组数量超出手机支持范围。") }
+        let pattern = (properties?["matchTitle"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard pattern.count <= 256 else { throw WorkflowError.invalid("分组名称匹配规则过长，请简化后重新导入。") }
+        let regex: NSRegularExpression?
+        do { regex = pattern.isEmpty ? nil : try NSRegularExpression(pattern: pattern, options: .caseInsensitive) }
+        catch { throw WorkflowError.invalid("分组名称匹配规则无效，请在 ComfyUI 中修正。") }
+        let requestedColors = (properties?["matchColors"]?.stringValue ?? "").split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let colors = try requestedColors.map { value -> String in
+            guard let hex = normalizedColor(value) else { throw WorkflowError.invalid("分组颜色筛选请使用十六进制颜色（如 #aabbcc）；当前规则无法可靠匹配。") }
+            return hex
+        }
+        let nodes = root["nodes"]?.arrayValue ?? []
+        let subgraphIDs = Set(subgraphs.compactMap { $0["id"]?.displayValue })
+        var groups: [(index: Int, x: Double, y: Double, control: WorkflowGroupSwitch)] = []
+        var identifiers = Set<String>()
+        for (index, group) in rawGroups.enumerated() {
+            let title = group["title"]?.stringValue ?? "分组"
+            if let regex = regex, regex.firstMatch(in: title, range: NSRange(title.startIndex..., in: title)) == nil { continue }
+            let color = normalizedColor(group["color"]?.stringValue ?? "")
+            if !colors.isEmpty && !colors.contains(color ?? "") { continue }
+            guard let bounds = group["bounding"]?.arrayValue, bounds.count == 4,
+                  let x = bounds[0].doubleValue, let y = bounds[1].doubleValue,
+                  let w = bounds[2].doubleValue, let h = bounds[3].doubleValue,
+                  [x, y, w, h].allSatisfy({ $0.isFinite && abs($0) <= 100_000_000 }), w > 0, h > 0 else {
+                throw WorkflowError.invalid("分组范围缺失或无效，请在 ComfyUI 中重新保存画布。")
+            }
+            let key = group["id"].map { "id_" + $0.displayValue } ?? "index_\(index)"
+            guard identifiers.insert(key).inserted else { throw WorkflowError.invalid("分组编号重复，无法可靠切换。") }
+            var members: [JSONValue] = []
+            for node in nodes {
+                guard let position = pair(node["pos"]), let size = pair(node["size"]), size.0 > 0, size.1 > 0 else {
+                    throw WorkflowError.invalid("部分节点缺少原始位置或尺寸，请在 ComfyUI 中保存后重新导入。")
+                }
+                var cx = position.0 + size.0 / 2
+                var cy = position.1 + size.1 / 2 - (node["type"]?.stringValue == "Reroute" ? 0 : 15)
+                if node["flags"]?["collapsed"]?.boolValue == true {
+                    cy = position.1 - 15
+                    // Browser font metrics are not available. Accept only unambiguous membership
+                    // across the full range of possible collapsed-title widths.
+                    let low = position.0 + min(size.0, 60) / 2, high = cx
+                    if cy >= y && cy < y + h && high >= x && low < x + w {
+                        guard low >= x && high < x + w else { throw WorkflowError.invalid("分组边缘有折叠节点，归属不明确。请展开该节点并保存后重新导入。") }
+                    }
+                    cx = low
+                }
+                if cx >= x && cx < x + w && cy >= y && cy < y + h {
+                    if subgraphIDs.contains(node["type"]?.stringValue ?? "") || node["subgraph"] != nil {
+                        throw WorkflowError.invalid("此分组包含子图，目前请在 ComfyUI 中切换后重新导入。")
+                    }
+                    members.append(node)
+                }
+            }
+            let control = WorkflowGroupSwitch(controllerID: controllerID, fieldName: "__group_" + key, title: title, color: color,
+                nodeIDs: members.compactMap { $0["id"]?.displayValue }, activeCount: members.filter { ($0["mode"]?.integerValue ?? 0) == 0 }.count,
+                offMode: controller["type"]?.stringValue == "Fast Groups Muter (rgthree)" ? 2 : 4, restriction: restriction)
+            groups.append((index, x, y, control))
+        }
+        let sort = properties?["sort"]?.stringValue ?? "position"
+        let alphabetText = (properties?["customSortAlphabet"]?.stringValue ?? "").replacingOccurrences(of: "\n", with: "").lowercased()
+        let alphabet = alphabetText.contains(",") ? alphabetText.components(separatedBy: ",") : alphabetText.trimmingCharacters(in: .whitespacesAndNewlines).map(String.init)
+        groups.sort { a, b in
+            if sort == "position" {
+                if floor(a.y / 30) != floor(b.y / 30) { return floor(a.y / 30) < floor(b.y / 30) }
+                if floor(a.x / 30) != floor(b.x / 30) { return floor(a.x / 30) < floor(b.x / 30) }
+            } else {
+                if sort == "custom alphabet", !alphabet.isEmpty {
+                    let ai = alphabet.firstIndex { a.control.title.lowercased().hasPrefix($0) } ?? Int.max
+                    let bi = alphabet.firstIndex { b.control.title.lowercased().hasPrefix($0) } ?? Int.max
+                    if ai != bi { return ai < bi }
+                }
+                let order = a.control.title.localizedStandardCompare(b.control.title)
+                if order != .orderedSame { return order == .orderedAscending }
+            }
+            return a.index < b.index
+        }
+        return groups.map(\.control)
+    }
+    private static func pair(_ value: JSONValue?) -> (Double, Double)? {
+        let a = value?.arrayValue
+        let x = a.flatMap { $0.count >= 2 ? $0[0].doubleValue : nil } ?? value?["0"]?.doubleValue
+        let y = a.flatMap { $0.count >= 2 ? $0[1].doubleValue : nil } ?? value?["1"]?.doubleValue
+        guard let x = x, let y = y, x.isFinite, y.isFinite else { return nil }; return (x, y)
+    }
+    private static func normalizedColor(_ color: String) -> String? {
+        var hex = color.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if hex.hasPrefix("#") { hex.removeFirst() }
+        if hex.count == 3 { hex = hex.map { String(repeating: String($0), count: 2) }.joined() }
+        guard hex.count == 6, hex.allSatisfy({ $0.isHexDigit }) else { return nil }
+        return "#" + hex
     }
 }
 

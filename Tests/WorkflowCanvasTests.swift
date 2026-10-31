@@ -2,6 +2,106 @@ import XCTest
 @testable import ComfyWorkbenchCore
 
 final class WorkflowCanvasTests: XCTestCase {
+    private func groupFixture(restriction: String = "default", type: String = "Fast Groups Bypasser (rgthree)") throws -> WorkflowCanvas {
+        let raw: [String: Any] = ["nodes": [
+            ["id": 1, "type": "Text", "pos": [10, 40], "size": [100, 80], "widgets_values": ["example"]],
+            ["id": 2, "type": "Text", "pos": [120, 40], "size": [100, 80], "mode": 2, "widgets_values": ["other"]],
+            ["id": 3, "type": "Text", "pos": [10, 350], "size": [100, 80], "mode": 4, "widgets_values": ["third"]],
+            ["id": 98, "type": type, "pos": [-400, 0], "size": [200, 120], "properties": ["matchTitle": "^0", "toggleRestriction": restriction]]
+        ], "links": [], "groups": [
+            ["id": 10, "title": "01 First", "bounding": [0, 0, 300, 200], "color": "#3f789e"],
+            ["id": 20, "title": "02 Second", "bounding": [0, 300, 300, 200], "color": "#a08020"],
+            ["id": 30, "title": "Decoration", "bounding": [500, 0, 300, 200]]
+        ]]
+        return try WorkflowCanvas(data: JSONSerialization.data(withJSONObject: raw))
+    }
+    func testGroupSwitchDiscoveryAndExactModeUndo() throws {
+        var canvas = try groupFixture()
+        XCTAssertTrue(canvas.groupSwitchIssues.isEmpty)
+        XCTAssertEqual(canvas.groupSwitches.map(\.title), ["01 First", "02 Second"])
+        XCTAssertEqual(canvas.groupSwitches[0].nodeIDs, ["1", "2"])
+        XCTAssertTrue(canvas.groupSwitches[0].partiallyEnabled)
+        let original = canvas.root
+        let change = try canvas.groupModeChange(fieldID: "98.__group_id_10", enabled: false)
+        try canvas.restoreGroupModes(change.after)
+        XCTAssertEqual(canvas.root["nodes"]?.arrayValue?[0]["mode"], .integer(4))
+        XCTAssertEqual(canvas.root["nodes"]?.arrayValue?[1]["mode"], .integer(4))
+        XCTAssertEqual(canvas.root["nodes"]?.arrayValue?[2], original["nodes"]?.arrayValue?[2])
+        XCTAssertEqual(canvas.root["links"], original["links"])
+        try canvas.restoreGroupModes(change.before)
+        XCTAssertEqual(canvas.root, original) // Missing mode and mixed muted state both survive.
+        XCTAssertEqual(canvas.nodes.first { $0.id == "98" }?.fields.first?.title, "01 First")
+        XCTAssertThrowsError(try canvas.update(fieldID: "98.__group_id_10", value: .string("false")))
+        XCTAssertEqual(canvas.root, original)
+    }
+    func testGroupRestrictionsAndMuterAreAppliedToActualNodes() throws {
+        var canvas = try groupFixture(restriction: "always one", type: "Fast Groups Muter (rgthree)")
+        try canvas.update(fieldID: "98.__group_id_20", value: .bool(true))
+        XCTAssertEqual(canvas.root["nodes"]?.arrayValue?[0]["mode"], .integer(2))
+        XCTAssertEqual(canvas.root["nodes"]?.arrayValue?[1]["mode"], .integer(2))
+        XCTAssertEqual(canvas.root["nodes"]?.arrayValue?[2]["mode"], .integer(0))
+        try canvas.update(fieldID: "98.__group_id_20", value: .bool(false))
+        XCTAssertTrue(canvas.groupSwitches[1].enabled)
+        var maxOne = try groupFixture(restriction: "max one")
+        try maxOne.update(fieldID: "98.__group_id_20", value: .bool(true))
+        try maxOne.update(fieldID: "98.__group_id_20", value: .bool(false))
+        XCTAssertTrue(maxOne.groupSwitches.allSatisfy { !$0.enabled })
+    }
+    func testGroupExportRetainsFunctionalMetadataAndStablePanelIDs() throws {
+        let canvas = try groupFixture()
+        let imported = try WorkflowCanvas(data: canvas.exportData())
+        XCTAssertEqual(imported.root["groups"], canvas.root["groups"])
+        XCTAssertEqual(imported.groupSwitches, canvas.groupSwitches)
+        XCTAssertEqual(imported.fields.map(\.id), canvas.fields.map(\.id))
+        XCTAssertFalse(try imported.exportData().isEmpty)
+    }
+    func testGroupInvalidRulesFailClosedAndSnapshotValidationIsAtomic() throws {
+        var canvas = try groupFixture()
+        let before = canvas.root
+        XCTAssertThrowsError(try canvas.restoreGroupModes(.object(["1": .integer(4), "missing": .integer(0)])))
+        XCTAssertEqual(canvas.root, before)
+        var raw = try XCTUnwrap(before.objectValue)
+        var nodes = try XCTUnwrap(raw["nodes"]?.arrayValue)
+        var controller = try XCTUnwrap(nodes[3].objectValue)
+        controller["properties"] = .object(["matchTitle": .string("[")]); nodes[3] = .object(controller)
+        raw["nodes"] = .array(nodes)
+        let invalid = try WorkflowCanvas(data: JSONValue.object(raw).data())
+        XCTAssertNotNil(invalid.groupSwitchIssues["98"]); XCTAssertTrue(invalid.groupSwitches.isEmpty)
+        raw.removeValue(forKey: "groups")
+        let missing = try WorkflowCanvas(data: JSONValue.object(raw).data())
+        XCTAssertNotNil(missing.groupSwitchIssues["98"])
+    }
+    func testGroupSwitchChangesTheRunnablePromptThroughBypass() throws {
+        let input = #"{"nodes":[{"id":1,"type":"Source","pos":[400,50],"size":[100,80],"outputs":[{"type":"IMAGE","name":"IMAGE"}]},{"id":2,"type":"Filter","pos":[40,50],"size":[100,80],"inputs":[{"name":"image","type":"IMAGE","link":1}],"outputs":[{"type":"IMAGE","name":"IMAGE"}]},{"id":3,"type":"Sink","pos":[400,250],"size":[100,80],"inputs":[{"name":"image","type":"IMAGE","link":2}],"outputs":[]},{"id":98,"type":"Fast Groups Bypasser (rgthree)","pos":[-400,0],"size":[200,100]}],"links":[[1,1,0,2,0,"IMAGE"],[2,2,0,3,0,"IMAGE"]],"groups":[{"id":1,"title":"Refinement","bounding":[0,0,200,200]}]}"#
+        let definitions = Data(#"{"Source":{"input":{"required":{}},"output":["IMAGE"]},"Filter":{"input":{"required":{"image":["IMAGE"]}},"output":["IMAGE"]},"Sink":{"input":{"required":{"image":["IMAGE"]}},"output":[],"output_node":true}}"#.utf8)
+        var canvas = try graph(input)
+        let active = try JSONValue(data: UIWorkflowConverter.convert(data: canvas.data(), objectInfoData: definitions))
+        XCTAssertNotNil(active["2"]); XCTAssertNil(active["98"])
+        try canvas.update(fieldID: "98.__group_id_1", value: .bool(false))
+        let bypassed = try JSONValue(data: UIWorkflowConverter.convert(data: canvas.data(), objectInfoData: definitions))
+        XCTAssertNil(bypassed["2"]); XCTAssertNil(bypassed["98"])
+        XCTAssertEqual(bypassed["3"]?["inputs"]?["image"], .array([.string("1"), .integer(0)]))
+    }
+    func testGroupDuplicateTitlesColorFilterAndNestedMembership() throws {
+        var raw = try XCTUnwrap(groupFixture().root.objectValue)
+        raw["groups"] = .array([
+            .object(["id": .integer(10), "title": .string("Same"), "bounding": .array([0,0,300,200].map { .integer(Int64($0)) }), "color": .string("#abc")]),
+            .object(["id": .integer(20), "title": .string("Same"), "bounding": .array([0,0,110,200].map { .integer(Int64($0)) }), "color": .string("#AABBCC")]),
+            .object(["id": .integer(30), "title": .string("Other"), "bounding": .array([0,300,300,200].map { .integer(Int64($0)) }), "color": .string("#fff")])
+        ])
+        var nodes = try XCTUnwrap(raw["nodes"]?.arrayValue)
+        var controller = try XCTUnwrap(nodes[3].objectValue)
+        controller["properties"] = .object(["matchColors": .string("#aabbcc"), "sort": .string("alphanumeric")])
+        nodes[3] = .object(controller); raw["nodes"] = .array(nodes)
+        var canvas = try WorkflowCanvas(data: JSONValue.object(raw).data())
+        XCTAssertEqual(canvas.groupSwitches.count, 2)
+        XCTAssertEqual(Set(canvas.groupSwitches.map(\.id)).count, 2)
+        XCTAssertEqual(canvas.groupSwitches[0].nodeIDs, ["1", "2"])
+        XCTAssertEqual(canvas.groupSwitches[1].nodeIDs, ["1"])
+        try canvas.update(fieldID: "98.__group_id_20", value: .bool(false))
+        XCTAssertFalse(canvas.groupSwitches[0].enabled) // Shared member state must propagate.
+        XCTAssertEqual(canvas.root["nodes"]?.arrayValue?[1]["mode"], .integer(2))
+    }
     func testVideoNamedAndDictionaryWidgetsStayInSync() throws {
         var canvas = try graph(#"{"nodes":[{"id":1,"type":"VHS_LoadVideo","widgets_values_named":{"video":"old.mp4","force_rate":24},"widgets_values":{"video":"old.mp4","force_rate":24},"mode":4}],"links":[]}"#)
         try canvas.update(fieldID: "1.video", fromText: "new.mp4")

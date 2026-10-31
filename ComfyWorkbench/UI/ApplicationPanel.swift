@@ -40,7 +40,9 @@ private struct ApplicationParameter: View {
     private var title: String { config.title(for: field) }
     var body: some View {
         Group {
-            if config.control == .slider, let range = config.sliderRange(for: field) {
+            if store.canvas?.groupSwitches.contains(where: { $0.id == field.id }) == true {
+                WorkflowGroupSwitchRow(field: field, title: title)
+            } else if config.control == .slider, let range = config.sliderRange(for: field) {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack { Text(title).font(.subheadline.weight(.medium)); Spacer(); Button { edit() } label: { Text(field.value.displayValue).monospacedDigit().font(.subheadline).frame(minHeight: 32) } }
                     Slider(value: $slider, in: range, step: config.step ?? field.schema.step ?? (field.schema.kind == .integer ? 1 : 0.1), onEditingChanged: { editing in
@@ -80,7 +82,7 @@ struct PanelConfiguration: View {
     @State private var search = ""
     @State private var editing: PanelFieldConfiguration?
     private var available: [WorkflowField] {
-        (store.canvas?.fields ?? []).filter { search.isEmpty || "\($0.name) \($0.nodeType) #\($0.nodeID)".localizedCaseInsensitiveContains(search) }
+        (store.canvas?.fields ?? []).filter { search.isEmpty || "\($0.title) \($0.nodeType) #\($0.nodeID)".localizedCaseInsensitiveContains(search) }
     }
     var body: some View {
         NavigationView {
@@ -113,7 +115,7 @@ struct PanelConfiguration: View {
                     TextField("搜索参数或节点", text: $search).textInputAutocapitalization(.never)
                     ForEach(available) { field in
                         Toggle(isOn: Binding(get: { store.panelItems.contains { $0.id == field.id } }, set: { store.pin(field, enabled: $0) })) {
-                            VStack(alignment: .leading, spacing: 4) { Text(field.name); Text("\(field.nodeType) #\(field.nodeID)").font(.caption2).foregroundColor(.secondary) }
+                            VStack(alignment: .leading, spacing: 4) { Text(field.title); Text("\(field.nodeType) #\(field.nodeID)").font(.caption2).foregroundColor(.secondary) }
                         }.tint(.mint)
                     }
                 }
@@ -146,6 +148,7 @@ private struct PanelFieldEditor: View {
         _options = State(initialValue: (configuration.choices.isEmpty ? field.schema.options.map(\.displayValue) : configuration.choices).joined(separator: "\n"))
     }
     private var controls: [PanelFieldConfiguration.Control] {
+        if store.canvas?.groupSwitches.contains(where: { $0.id == field.id }) == true { return [.automatic, .toggle] }
         var values: [PanelFieldConfiguration.Control] = [.automatic]
         if [.text, .integer, .decimal].contains(field.schema.kind) { values.append(.text) }
         if field.schema.kind == .text { values.append(.multiline) }
@@ -198,5 +201,31 @@ private struct PanelFieldEditor: View {
             guard let index = items.firstIndex(where: { $0.id == config.id }) else { throw WorkflowError.invalid("此参数已从面板移除。") }
             items[index] = config; try store.configurePanel(items); presentation.wrappedValue.dismiss()
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+struct WorkflowGroupSwitchRow: View {
+    @EnvironmentObject private var store: WorkbenchStore
+    let field: WorkflowField
+    var title: String? = nil
+    private var control: WorkflowGroupSwitch? { store.canvas?.groupSwitches.first { $0.id == field.id } }
+    private var dotColor: Color {
+        guard let hex = control?.color?.dropFirst(), let number = UInt32(hex, radix: 16) else { return Palette.paper.opacity(0.5) }
+        return Color(red: Double((number >> 16) & 255) / 255, green: Double((number >> 8) & 255) / 255, blue: Double(number & 255) / 255)
+    }
+    var body: some View {
+        Toggle(isOn: Binding(get: { control?.enabled ?? false }, set: { enabled in
+            do { try store.edit(field, text: enabled ? "true" : "false") } catch { store.error = error.localizedDescription }
+        })) {
+            HStack(alignment: .top, spacing: 10) {
+                Circle().fill(dotColor).frame(width: 7, height: 7).padding(.top, 6)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(title ?? field.title).font(.system(size: 15, weight: .medium)).fixedSize(horizontal: false, vertical: true)
+                    Text(control?.status ?? "分组不可用").font(.caption).foregroundColor(.secondary)
+                }
+            }
+        }.tint(Color(red: 0.53, green: 0.83, blue: 0.8)).padding(18).frame(minHeight: 72)
+            .disabled(store.busy || control?.nodeIDs.isEmpty != false)
+            .accessibilityIdentifier("workflow-group-" + field.id)
     }
 }

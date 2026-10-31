@@ -207,16 +207,12 @@ struct NativeFrost: UIViewRepresentable {
 
 struct ArtworkBackground: View {
     var image: UIImage?
-    var clean = false
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 if let image = image {
-                    if clean { FittedArtwork(image: image, margin: CGSize(width: 28, height: 112)) }
-                    else {
                         ArtworkImageSurface(image: image).frame(width: geo.size.width, height: geo.size.height).clipped()
                         LinearGradient(stops: [.init(color: .black.opacity(0.18), location: 0), .init(color: .clear, location: 0.22), .init(color: .clear, location: 0.72), .init(color: .black.opacity(0.13), location: 1)], startPoint: .top, endPoint: .bottom)
-                    }
                 } else {
                     LinearGradient(colors: [Color(red: 0.34, green: 0.48, blue: 0.56), Palette.ink, Color(red: 0.29, green: 0.25, blue: 0.33)], startPoint: .topLeading, endPoint: .bottomTrailing)
                     Ellipse().fill(Palette.paper.opacity(0.24)).frame(width: geo.size.width * 0.9, height: geo.size.height * 0.75).rotationEffect(.degrees(-32)).blur(radius: 40).offset(x: -90, y: -140)

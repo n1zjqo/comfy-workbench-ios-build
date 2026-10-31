@@ -5,7 +5,7 @@ struct CreationPage: View {
     @Binding var clean: Bool
     var body: some View {
         VStack(spacing: 0) {
-            if !clean {
+            Group {
                 Picker("创作方式", selection: $strata.assistantSelected) {
                     Text("ComfyUI 创作").tag(false)
                     Text("Strata 助手").tag(true)
@@ -228,7 +228,9 @@ struct StrataChatPage: View {
                                         Label("用于 ComfyUI", systemImage: "wand.and.stars").font(.subheadline).frame(minHeight: 44)
                                     }.buttonStyle(.plain).disabled(strata.chatting)
                                 }
-                            }.padding(16).frame(maxWidth: .infinity, alignment: .leading).glass(18)
+                            }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                                .background(message.role == "user" ? Color(red: 0.32, green: 0.59, blue: 0.59).opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 17)).glass(17)
+                                .padding(message.role == "user" ? .leading : .trailing, 40)
                         }
                     } else {
                         if strata.tasks.isEmpty { taskGuide }

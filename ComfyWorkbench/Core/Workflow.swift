@@ -46,6 +46,9 @@ public struct WorkflowField: Identifiable, Equatable {
     public let name: String
     public let value: JSONValue
     public let schema: WorkflowFieldSchema
+    // Display-only label for frontend controls; never serialized into API inputs.
+    public var displayName: String? = nil
+    public var title: String { displayName ?? name }
 
     public func parsedValue(from text: String) throws -> JSONValue {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)

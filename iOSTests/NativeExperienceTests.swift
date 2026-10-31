@@ -3,9 +3,105 @@ import SwiftUI
 import UIKit
 import Combine
 import WebKit
+import AVFoundation
 @testable import ComfyWorkbench
 
 final class NativeExperienceTests: XCTestCase {
+    @MainActor func testGroupPanelSwitchPersistsAndUndoRestoresMixedModes() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = WorkbenchStore(storageURL: folder)
+        let data = Data(#"{"nodes":[{"id":1,"type":"Text","pos":[10,40],"size":[100,80],"widgets_values":["example"]},{"id":2,"type":"Text","pos":[120,40],"size":[100,80],"mode":2,"widgets_values":["other"]},{"id":98,"type":"Fast Groups Bypasser (rgthree)","pos":[-400,0],"size":[200,100]}],"links":[],"groups":[{"id":10,"title":"Refinement","bounding":[0,0,300,200],"color":"#528a9e"}]}"#.utf8)
+        let workflow = SavedWorkflow(name: "Synthetic groups", data: data)
+        store.workflows = [workflow]; store.select(workflow.id)
+        try store.showNodeInPanel("98", enabled: true)
+        XCTAssertEqual(store.panelItems.map(\.id), ["98.__group_id_10"])
+        let field = try XCTUnwrap(store.canvas?.fields.first { $0.id == "98.__group_id_10" })
+        try store.edit(field, text: "false")
+        XCTAssertFalse(try XCTUnwrap(store.canvas?.groupSwitches.first).enabled)
+        let restored = WorkbenchStore(storageURL: folder)
+        XCTAssertFalse(try XCTUnwrap(restored.canvas?.groupSwitches.first).enabled)
+        restored.undoEdit()
+        XCTAssertEqual(restored.canvas?.root, try JSONValue(data: data))
+        XCTAssertTrue(try XCTUnwrap(restored.canvas?.groupSwitches.first).partiallyEnabled)
+        restored.redoEdit(); XCTAssertFalse(try XCTUnwrap(restored.canvas?.groupSwitches.first).enabled)
+        let window = try host(ApplicationPanel { _ in }.environmentObject(restored).padding(20).background(Palette.workspace).preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        try capturePreview(window, name: "reference-group-panel")
+    }
+    @MainActor func testCleanCreationKeepsTheSameFullBleedBackground() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = WorkbenchStore(storageURL: folder)
+        let strata = StrataStore(storage: folder.appendingPathComponent("strata.json"))
+        let picture = UIGraphicsImageRenderer(size: CGSize(width: 600, height: 900)).image { ctx in
+            UIColor.cyan.setFill(); ctx.fill(CGRect(x: 0, y: 0, width: 600, height: 900))
+            UIColor.red.setFill(); ctx.fill(CGRect(x: 120, y: 220, width: 360, height: 420))
+        }
+        store.background = picture
+        let normal = try host(WorkbenchView().environmentObject(store).environmentObject(strata))
+        let normalImage = try XCTUnwrap(descendants(normal).compactMap { $0 as? UIImageView }.first { $0.image === picture })
+        let normalFrame = normalImage.convert(normalImage.bounds, to: normal)
+        normal.isHidden = true
+        let clean = try host(WorkbenchView(initiallyClean: true).environmentObject(store).environmentObject(strata))
+        defer { clean.isHidden = true }
+        let cleanImage = try XCTUnwrap(descendants(clean).compactMap { $0 as? UIImageView }.first { $0.image === picture })
+        XCTAssertEqual(cleanImage.contentMode, .scaleAspectFill)
+        XCTAssertEqual(cleanImage.convert(cleanImage.bounds, to: clean), normalFrame)
+        let rendered = try capturePreview(clean, name: "reference-clean-creation")
+        let expected = try host(ArtworkBackground(image: picture))
+        defer { expected.isHidden = true }
+        let baseline = try capturePreview(expected, name: "background-only-baseline")
+        let actualPixel = try rgba(rendered), expectedPixel = try rgba(baseline)
+        for x in stride(from: 30, through: 720, by: 69) {
+            for y in stride(from: 80, through: 1510, by: 143) {
+                let a = actualPixel(x,y), b = expectedPixel(x,y)
+                XCTAssertLessThanOrEqual(abs(Int(a.0)-Int(b.0)) + abs(Int(a.1)-Int(b.1)) + abs(Int(a.2)-Int(b.2)), 6, "Clean mode must contain only the unchanged background")
+            }
+        }
+    }
+    @MainActor func testCompactConversationRendersRequestAndResponseSeparately() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = WorkbenchStore(storageURL: folder)
+        var job = GenerationJob(name: "Synthetic workflow", message: "A quiet shoreline in soft morning light.", promptData: Data("{}".utf8), server: ServerConfig(baseURL: "https://example.com"))
+        job.finished = true; job.state = "已完成"; job.text = ["Synthetic generation response."]
+        let window = try host(ScrollView { JobBubble(job: job).padding(22) }.background(Palette.workspace).environmentObject(store).preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        try capturePreview(window, name: "reference-compact-conversation")
+    }
+    @MainActor func testVideoPosterUsesDecodedFrameAndPreferredRotation() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("synthetic.mp4")
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: 160, AVVideoHeightKey: 96])
+        input.transform = CGAffineTransform(rotationAngle: .pi / 2)
+        let adapter = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey as String: 160, kCVPixelBufferHeightKey as String: 96])
+        writer.add(input); XCTAssertTrue(writer.startWriting()); writer.startSession(atSourceTime: .zero)
+        for frame in 0..<6 {
+            for _ in 0..<100 where !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertTrue(input.isReadyForMoreMediaData)
+            var buffer: CVPixelBuffer?
+            XCTAssertEqual(CVPixelBufferPoolCreatePixelBuffer(nil, try XCTUnwrap(adapter.pixelBufferPool), &buffer), kCVReturnSuccess)
+            let pixels = try XCTUnwrap(buffer); CVPixelBufferLockBaseAddress(pixels, [])
+            let base = try XCTUnwrap(CVPixelBufferGetBaseAddress(pixels)).assumingMemoryBound(to: UInt8.self)
+            let stride = CVPixelBufferGetBytesPerRow(pixels)
+            for y in 0..<96 { for x in 0..<160 { let offset = y * stride + x * 4; base[offset] = 0; base[offset+1] = 0; base[offset+2] = 255; base[offset+3] = 255 } }
+            CVPixelBufferUnlockBaseAddress(pixels, [])
+            XCTAssertTrue(adapter.append(pixels, withPresentationTime: CMTime(value: Int64(frame), timescale: 10)))
+        }
+        input.markAsFinished(); await withCheckedContinuation { continuation in writer.finishWriting { continuation.resume() } }
+        XCTAssertEqual(writer.status, .completed)
+        let poster = try await VideoPoster.image(at: url)
+        XCTAssertLessThan(poster.size.width, poster.size.height)
+        XCTAssertLessThanOrEqual(max(poster.size.width, poster.size.height), 640)
+        let pixel = try rgba(poster)(Int(poster.size.width / 2), Int(poster.size.height / 2))
+        XCTAssertGreaterThan(pixel.0, 200); XCTAssertLessThan(pixel.1, 50); XCTAssertLessThan(pixel.2, 50)
+        let cached = try await VideoPoster.image(at: url)
+        XCTAssertTrue(cached === poster)
+    }
     @MainActor func testInactiveMixedReferencesAreVisibleWithoutFetchingOldMedia() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { NativeComfyProtocol.reset(); try? FileManager.default.removeItem(at: folder) }
