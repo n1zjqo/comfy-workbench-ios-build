@@ -11,7 +11,7 @@ final class NativeExperienceTests: XCTestCase {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
         let store = WorkbenchStore(storageURL: folder)
-        let data = Data(#"{"nodes":[{"id":1,"type":"Text","pos":[10,40],"size":[100,80],"widgets_values":["example"]},{"id":2,"type":"Text","pos":[120,40],"size":[100,80],"mode":2,"widgets_values":["other"]},{"id":98,"type":"Fast Groups Bypasser (rgthree)","pos":[-400,0],"size":[200,100]}],"links":[],"groups":[{"id":10,"title":"Refinement","bounding":[0,0,300,200],"color":"#528a9e"}]}"#.utf8)
+        let data = Data(##"{"nodes":[{"id":1,"type":"Text","pos":[10,40],"size":[100,80],"widgets_values":["example"]},{"id":2,"type":"Text","pos":[120,40],"size":[100,80],"mode":2,"widgets_values":["other"]},{"id":98,"type":"Fast Groups Bypasser (rgthree)","pos":[-400,0],"size":[200,100]}],"links":[],"groups":[{"id":10,"title":"Refinement","bounding":[0,0,300,200],"color":"#528a9e"}]}"##.utf8)
         let workflow = SavedWorkflow(name: "Synthetic groups", data: data)
         store.workflows = [workflow]; store.select(workflow.id)
         try store.showNodeInPanel("98", enabled: true)
@@ -810,4 +810,5 @@ private final class DelayedStrataProtocol: URLProtocol {
     }
     static func reset() { releaseOldStatus(); lock.lock(); posts = 0; lock.unlock() }
 }
+
 
