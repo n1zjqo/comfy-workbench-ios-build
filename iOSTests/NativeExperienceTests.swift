@@ -4,6 +4,7 @@ import UIKit
 import Combine
 import WebKit
 import AVFoundation
+import CryptoKit
 @testable import ComfyWorkbench
 
 final class NativeExperienceTests: XCTestCase {
@@ -101,6 +102,25 @@ final class NativeExperienceTests: XCTestCase {
         XCTAssertGreaterThan(pixel.0, 200); XCTAssertLessThan(pixel.1, 50); XCTAssertLessThan(pixel.2, 50)
         let cached = try await VideoPoster.image(at: url)
         XCTAssertTrue(cached === poster)
+        // Exercise the real thumbnail view against the app's local-media cache, without a server.
+        let store = WorkbenchStore(storageURL: folder)
+        let output = ComfyOutput(filename: "synthetic.mp4", kind: "videos")
+        let job = GenerationJob(name: "Synthetic video", message: "Example", promptData: Data("{}".utf8), server: ServerConfig(baseURL: "https://example.com"))
+        let mediaFolder = folder.appendingPathComponent("media").appendingPathComponent(job.id.uuidString)
+        try FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
+        let digest = SHA256.hash(data: Data(output.id.utf8)).map { String(format: "%02x", $0) }.joined()
+        try FileManager.default.copyItem(at: url, to: mediaFolder.appendingPathComponent(digest + ".mp4"))
+        let window = try host(OutputThumbnail(output: output, job: job, prominent: true, compact: true).padding(20).background(Palette.workspace).environmentObject(store).preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let render = try capturePreview(window, name: "reference-video-poster")
+        let renderedPixel = try rgba(render)
+        var redSamples = 0
+        for y in stride(from: 0, to: 1624, by: 8) { for x in stride(from: 0, to: 750, by: 8) {
+            let pixel = renderedPixel(x,y)
+            if pixel.0 > 180 && pixel.1 < 70 && pixel.2 < 70 { redSamples += 1 }
+        } }
+        XCTAssertGreaterThan(redSamples, 1000, "A video result must display its decoded poster rather than the empty tile")
     }
     @MainActor func testInactiveMixedReferencesAreVisibleWithoutFetchingOldMedia() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -810,5 +830,4 @@ private final class DelayedStrataProtocol: URLProtocol {
     }
     static func reset() { releaseOldStatus(); lock.lock(); posts = 0; lock.unlock() }
 }
-
 

@@ -108,7 +108,7 @@ struct ChatView: View {
                     }.padding(.horizontal, 24).padding(.top, 18)
                     ScrollViewReader { proxy in
                         ScrollView {
-                            VStack(alignment: .leading, spacing: 14) {
+                            LazyVStack(alignment: .leading, spacing: 14) {
                                 Spacer(minLength: 70)
                                 if store.jobs.isEmpty && store.background == nil {
                                     VStack(alignment: .leading, spacing: 12) {
