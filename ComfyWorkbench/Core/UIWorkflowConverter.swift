@@ -166,8 +166,8 @@ public enum UIWorkflowConverter {
             // Scope this adapter to verified classes and validate the template from this server.
             let dynamicPrefix = legacyAlias ? "input" : ["ImpactSwitch": "input", "LatentSwitch": "latent"][node.type]
             if let prefix = dynamicPrefix, let template = rules[prefix + "1"] {
-                for input in node.inputs {
-                    guard let name = input["name"]?.stringValue, rules[name] == nil, name.hasPrefix(prefix),
+                for name in Set(values.keys).union(connectedKeys) {
+                    guard rules[name] == nil, name.hasPrefix(prefix),
                           let number = Int(name.dropFirst(prefix.count)), number > 0, number <= 999999,
                           name == prefix + String(number) else { continue }
                     rules[name] = Rule(schema: template.schema, required: false)
