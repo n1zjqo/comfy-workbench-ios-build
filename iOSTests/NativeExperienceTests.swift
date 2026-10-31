@@ -39,7 +39,7 @@ final class NativeExperienceTests: XCTestCase {
             UIColor.cyan.setFill(); ctx.fill(CGRect(x: 0, y: 0, width: 600, height: 900))
             UIColor.red.setFill(); ctx.fill(CGRect(x: 120, y: 220, width: 360, height: 420))
         }
-        store.background = picture
+        store.background = picture; store.activeTab = 0
         let normal = try host(WorkbenchView().environmentObject(store).environmentObject(strata))
         let normalImage = try XCTUnwrap(descendants(normal).compactMap { $0 as? UIImageView }.first { $0.image === picture })
         let normalFrame = normalImage.convert(normalImage.bounds, to: normal)
