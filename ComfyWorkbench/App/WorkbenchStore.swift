@@ -222,6 +222,11 @@ private struct SavedState: Codable {
         let change = WorkflowChange(kind: .parameter, fieldID: current.id, label: current.name, before: current.value, after: try current.parsedValue(from: text))
         try commit(change)
     }
+    func changeNodeMode(_ nodeID: String, mode: Int64) throws {
+        guard let graph = canvas else { throw WorkflowError.invalid("没有工作流画布。") }
+        let modes = try graph.nodeModeChange(nodeID: nodeID, mode: mode)
+        try commit(WorkflowChange(kind: .groupModes, fieldID: nodeID, label: "节点运行模式", before: modes.before, after: modes.after))
+    }
     func pin(_ field: WorkflowField, enabled: Bool) {
         var items = panelItems
         if enabled && !items.contains(where: { $0.id == field.id }) { items.append(PanelFieldConfiguration(id: field.id)) }

@@ -91,6 +91,9 @@ struct WorkflowCanvasView: View {
             else { Text(trace.phase == .disconnected ? "历史结果仍会继续查询" : "已执行 \(trace.completedNodes.count) · 缓存 \(trace.cachedNodes.count)\(job.finished ? "" : " · 修改参数用于下一次生成")").font(.system(size: 10)).foregroundColor(.secondary) }
         }.padding(.horizontal, 14).padding(.vertical, 9).glass(16)
     }
+    private func setMode(_ nodeID: String, _ mode: Int64) {
+        do { try store.changeNodeMode(nodeID, mode: mode) } catch { store.error = error.localizedDescription }
+    }
     private func inspector(_ node: CanvasNode) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Capsule().fill(.white.opacity(0.22)).frame(width: 30, height: 3).frame(maxWidth: .infinity).padding(.top, 9)
@@ -101,6 +104,13 @@ struct WorkflowCanvasView: View {
                     Text("#\(node.id) · \(node.fields.count) 个参数\(node.bypassed ? " · 已绕过 / 禁用" : "")").font(.caption2).foregroundColor(.secondary)
                 }
                 Spacer(minLength: 0)
+                if store.canvas?.originalLayout == true {
+                    Menu {
+                        Button("启用") { setMode(node.id, 0) }
+                        Button("旁路（跳过并透传）") { setMode(node.id, 4) }
+                        Button("停用（不输出）") { setMode(node.id, 2) }
+                    } label: { Image(systemName: "power").frame(width: 44, height: 44) }.disabled(store.busy).accessibilityLabel("节点运行模式")
+                }
                 Button { selected = nil } label: { Image(systemName: "xmark").font(.system(size: 12, weight: .semibold)).frame(width: 44, height: 44) }.accessibilityLabel("收起节点参数")
             }.padding(.horizontal, 16).padding(.vertical, 12)
             if !node.fields.isEmpty {

@@ -10,11 +10,14 @@ public enum UIWorkflowConverter {
     }
 
     public static func convert(data: Data, objectInfoData: Data) throws -> Data {
-        let graph = try SubgraphExpansion.expand(JSONValue(data: data))
+        let original = try JSONValue(data: data)
+        let index = try WorkflowGraphIndex(original)
+        let settled = try WorkflowControlEngine.change(index: index, requested: [:])
         let definitions = try JSONValue(data: objectInfoData)
         guard let objectInfo = definitions.objectValue, !objectInfo.isEmpty else {
             throw ConversionError("服务器没有返回节点定义，请先连接 ComfyUI。")
         }
+        let graph = try SubgraphExpansion.expand(index.applyingModes(settled.after.objectValue ?? [:]), objectInfo: objectInfo)
         return try Converter(graph: graph, objectInfo: objectInfo).convert().data(prettyPrinted: true)
     }
 
@@ -33,6 +36,7 @@ public enum UIWorkflowConverter {
             let target: String
             let targetSlot: Int
         }
+        enum Resolved { case link(String, Int), literal(JSONValue) }
         struct Rule {
             let schema: [JSONValue]
             let required: Bool
@@ -46,8 +50,8 @@ public enum UIWorkflowConverter {
         var visiting = Set<String>()
 
         // These are frontend-only controls in the supplied workflow, with no execution output.
-        let decorations: Set<String> = ["Note", "MarkdownNote", "忽略多组孤海", "Label (rgthree)", "Fast Groups Bypasser (rgthree)", "Fast Groups Muter (rgthree)"]
-        let virtualTypes: Set<String> = ["SetNode", "GetNode", "Reroute"]
+        let decorations: Set<String> = Set(["Note", "MarkdownNote", "忽略多组孤海", "Label (rgthree)", "Fast Groups Bypasser (rgthree)", "Fast Groups Muter (rgthree)"]).union(WorkflowControlEngine.frontendTypes)
+        let virtualTypes: Set<String> = ["SetNode", "GetNode", "Reroute", "Reroute (rgthree)", "__WorkbenchBoundaryValue"]
         let frontendWidgets: Set<String> = [
             "upload", "choose video to upload", "videopreview", "preview", "control_after_generate"
         ]
@@ -91,6 +95,9 @@ public enum UIWorkflowConverter {
         func convert() throws -> JSONValue {
             var roots: [Node] = []
             for node in nodes.values where node.mode == 0 && !isVirtual(node) && !decorations.contains(node.type) {
+                if ["Random Unmuter (rgthree)", "Fast Actions Button (rgthree)"].contains(node.type) {
+                    throw ConversionError("\(node.type) 需要浏览器端随机或队列操作，手机暂不能执行这类行为。请先在原画布完成操作并停用该控制节点。")
+                }
                 if let definition = objectInfo[node.type] {
                     if definition["output_node"]?.boolValue == true { roots.append(node) }
                 } else if node.outputs.isEmpty {
@@ -118,12 +125,23 @@ public enum UIWorkflowConverter {
                 throw missingSchema(node)
             }
             var values = try namedWidgets(node)
+            let legacyAlias = ["LatentSwitch", "SEGSSwitch"].contains(node.type) && inputSchema["optional"]?["input1"] != nil
+            if legacyAlias, values["sel_mode"] == nil,
+               let modeSchema = inputSchema["required"]?["sel_mode"]?.arrayValue,
+               modeSchema.count > 1, let fallback = modeSchema[1]["default"], fallback.boolValue != nil {
+                values["sel_mode"] = fallback
+            }
             var connectedKeys = Set<String>()
+            var resolvedLinks = Set<String>()
             var dependencies = Set<String>()
             var inputNames = Set<String>()
             for (index, input) in node.inputs.enumerated() {
-                guard let name = input["name"]?.stringValue, !name.isEmpty,
-                      inputNames.insert(name).inserted else {
+                guard var name = input["name"]?.stringValue, !name.isEmpty else { throw ConversionError("节点输入缺少名称。") }
+                if legacyAlias {
+                    let prefix = node.type == "LatentSwitch" ? "latent" : "segs"
+                    if name.hasPrefix(prefix), let number = Int(name.dropFirst(prefix.count)), number > 0, name == prefix + String(number) { name = "input" + String(number) }
+                }
+                guard inputNames.insert(name).inserted else {
                     throw ConversionError("节点 \(id) 有重复或无名称的输入。")
                 }
                 guard let linkID = Self.identifier(input["link"]) else { continue }
@@ -133,13 +151,28 @@ public enum UIWorkflowConverter {
                     throw ConversionError("节点 \(id) 的输入 \(name) 指向无效连线。")
                 }
                 if let resolved = try resolve(edge.source, slot: edge.slot, path: []) {
-                    values[name] = .array([.string(resolved.0), .integer(Int64(resolved.1))])
-                    dependencies.insert(resolved.0)
+                    switch resolved {
+                    case .link(let source, let slot):
+                        values[name] = .array([.string(source), .integer(Int64(slot))])
+                        dependencies.insert(source); resolvedLinks.insert(name)
+                    case .literal(let value): values[name] = value
+                    }
                 }
             }
             var rules: [String: Rule] = [:]
             try expand(inputSchema, prefix: "", live: values, rules: &rules, node: node, depth: 0)
             try expandVideoFormat(node, live: values, rules: &rules)
+            // Impact's Python AnyType dictionary accepts numbered optional ports.
+            // Scope this adapter to verified classes and validate the template from this server.
+            let dynamicPrefix = legacyAlias ? "input" : ["ImpactSwitch": "input", "LatentSwitch": "latent"][node.type]
+            if let prefix = dynamicPrefix, let template = rules[prefix + "1"] {
+                for input in node.inputs {
+                    guard let name = input["name"]?.stringValue, rules[name] == nil, name.hasPrefix(prefix),
+                          let number = Int(name.dropFirst(prefix.count)), number > 0, number <= 999999,
+                          name == prefix + String(number) else { continue }
+                    rules[name] = Rule(schema: template.schema, required: false)
+                }
+            }
             for key in Array(values.keys) where rules[key] == nil {
                 if (frontendWidgets.contains(key) || isKnownFrontendWidget(key, node: node)), !connectedKeys.contains(key) {
                     values.removeValue(forKey: key)
@@ -154,14 +187,14 @@ public enum UIWorkflowConverter {
                     }
                     continue
                 }
-                try validate(value, rule: rule, linked: connectedKeys.contains(key), key: key, node: node)
+                try validate(value, rule: rule, linked: resolvedLinks.contains(key), key: key, node: node)
             }
             for dependency in dependencies.sorted() { try emit(dependency) }
             output[id] = .object(["class_type": .string(node.type), "inputs": .object(values)])
         }
 
         /// nil means an explicitly muted/bypassed source has no compatible passthrough.
-        func resolve(_ id: String, slot: Int, path: Set<String>) throws -> (String, Int)? {
+        func resolve(_ id: String, slot: Int, path: Set<String>) throws -> Resolved? {
             let token = "\(id):\(slot)"
             guard path.count < 512, !path.contains(token) else {
                 throw ConversionError("节点 \(id) 的虚拟连线存在循环或过深的依赖。")
@@ -184,6 +217,10 @@ public enum UIWorkflowConverter {
                 guard let candidate = candidates.first else { return nil }
                 return try resolveInput(node, index: candidate.offset, path: nextPath)
             }
+            if node.type == "__WorkbenchBoundaryValue" {
+                guard let value = node.raw["__boundary_value"], value.isScalar, value != .null else { throw ConversionError("子图边界值无效。") }
+                return .literal(value)
+            }
             if node.type == "GetNode" {
                 guard let name = try namedWidgets(node)["Constant"]?.stringValue,
                       let matches = setters[name], matches.count == 1, let setter = matches.first else {
@@ -192,17 +229,17 @@ public enum UIWorkflowConverter {
                 if setter.mode == 2 { return nil }
                 return try resolveInput(setter, index: slot, path: nextPath)
             }
-            if node.type == "SetNode" || node.type == "Reroute" {
+            if node.type == "SetNode" || node.type == "Reroute" || node.type == "Reroute (rgthree)" {
                 guard node.inputs.count == 1, slot == 0 else {
                     throw ConversionError("虚拟节点 \(id) 的端口结构不受支持。")
                 }
                 return try resolveInput(node, index: 0, path: nextPath)
             }
             if decorations.contains(node.type) { throw ConversionError("执行连线引用了说明节点 \(id)。") }
-            return (id, slot)
+            return .link(id, slot)
         }
 
-        func resolveInput(_ node: Node, index: Int, path: Set<String>) throws -> (String, Int)? {
+        func resolveInput(_ node: Node, index: Int, path: Set<String>) throws -> Resolved? {
             guard index < node.inputs.count else { throw ConversionError("节点 \(node.id) 缺少透传输入。") }
             guard let id = Self.identifier(node.inputs[index]["link"]) else { return nil }
             guard let edge = links[id], edge.target == node.id, edge.targetSlot == index else {
@@ -254,7 +291,7 @@ public enum UIWorkflowConverter {
                 "ImageScaleBy": ["upscale_method", "scale_by"], "LatentUpscaleBy": ["upscale_method", "scale_by"],
                 "UpscaleModelLoader": ["model_name"], "CLIPSetLastLayer": ["stop_at_clip_layer"]
             ]
-            guard let keys = layouts[node.type], let schema = objectInfo[node.type]?["input"] else {
+            guard let keys = layouts[node.type] ?? WorkflowWidgetLayout.names(raw: node.raw, definition: objectInfo[node.type], count: positional.count), let schema = objectInfo[node.type]?["input"] else {
                 throw ConversionError("节点 \(node.id)（\(node.type)）的参数只按位置保存，尚无可靠的转换规则。请在 ComfyUI 导出 API 格式后导入。")
             }
             var values = positional
@@ -444,6 +481,68 @@ public enum UIWorkflowConverter {
 /// original canvas, coordinates, widget values and export data remain untouched.
 private enum SubgraphExpansion {
     typealias Error = UIWorkflowConverter.ConversionError
+    /// Only explicit instance mappings are applied. Values stay local to each expanded instance.
+    static func promotedValues(instance: JSONValue, definition: JSONValue, children: inout [JSONValue], objectInfo: [String: JSONValue]) throws -> [Int: JSONValue] {
+        let positional = instance["widgets_values"]?.arrayValue ?? []
+        let named = instance["widgets_values_named"]?.objectValue ?? instance["widgets_values"]?.objectValue ?? [:]
+        let proxies = instance["properties"]?["proxyWidgets"]?.arrayValue ?? []
+        let inputs = instance["inputs"]?.arrayValue ?? []
+        let interfaceNames = Set(proxies.compactMap { proxy -> String? in
+            guard let a = proxy.arrayValue, a.count == 2, a[0].displayValue == "-1" else { return nil }
+            return a[1].stringValue
+        })
+        let widgets = inputs.enumerated().compactMap { slot, port -> (Int, String)? in
+            guard let name = port["widget"]?["name"]?.stringValue ?? port["name"]?.stringValue,
+                  port["widget"] != nil || interfaceNames.contains(name) else { return nil }
+            return (slot, name)
+        }
+        guard Set(widgets.map { $0.1 }).count == widgets.count else { throw Error("子图接口控件名称重复。") }
+        if !widgets.isEmpty {
+            guard (positional.isEmpty || positional.count == widgets.count), Set(named.keys).isSubset(of: Set(widgets.map { $0.1 })) else { throw Error("子图接口控件与实例参数数量不一致。") }
+            var values: [Int: JSONValue] = [:]
+            for (position, widget) in widgets.enumerated() {
+                let arrayValue: JSONValue? = positional.isEmpty ? nil : positional[position]
+                if let a = arrayValue, let n = named[widget.1], a != n { throw Error("子图命名参数与位置参数不一致。") }
+                if let value = named[widget.1] ?? arrayValue {
+                    guard value.isScalar, value != .null else { throw Error("子图接口值必须是可识别的标量。") }
+                    values[widget.0] = value
+                }
+            }
+            return values
+        }
+        if positional.isEmpty && named.isEmpty && (definition["widgets"]?.arrayValue ?? []).isEmpty { return [:] }
+        // Legacy proxies serialize one value per explicit (child ID, widget name) pair.
+        guard named.isEmpty, !proxies.isEmpty, proxies.count == positional.count else { throw Error("子图提升控件缺少明确映射，请从 ComfyUI 导出 API 工作流。") }
+        var targets = Set<String>()
+        for (proxy, value) in zip(proxies, positional) {
+            guard let pair = proxy.arrayValue, pair.count == 2, let name = pair[1].stringValue,
+                  let index = children.firstIndex(where: { $0["id"]?.displayValue == pair[0].displayValue }),
+                  targets.insert(WorkflowGraphIndex.token([pair[0].displayValue, name])).inserted,
+                  var child = children[index].objectValue else { throw Error("子图代理控件引用无效或重复。") }
+            let type = child["type"]?.stringValue ?? ""
+            var updated = false
+            if var dictionary = child["widgets_values_named"]?.objectValue {
+                guard dictionary[name] != nil else { throw Error("子图代理指向不存在的控件。") }
+                // A dual positional representation needs a verified order before editing.
+                if let array = child["widgets_values"]?.arrayValue {
+                    guard let names = WorkflowWidgetLayout.names(raw: .object(child), definition: objectInfo[type], count: array.count),
+                          names.contains(name), names.map({ dictionary[$0] ?? .null }) == array else { throw Error("子图代理控件的位置映射不明确。") }
+                }
+                dictionary[name] = value; child["widgets_values_named"] = .object(dictionary); updated = true
+            }
+            if var dictionary = child["widgets_values"]?.objectValue {
+                guard dictionary[name] != nil else { throw Error("子图代理指向不存在的控件。") }
+                dictionary[name] = value; child["widgets_values"] = .object(dictionary); updated = true
+            } else if var array = child["widgets_values"]?.arrayValue {
+                guard let names = WorkflowWidgetLayout.names(raw: .object(child), definition: objectInfo[type], count: array.count),
+                      let slot = names.firstIndex(of: name) else { throw Error("子图代理控件的位置映射不明确。") }
+                array[slot] = value; child["widgets_values"] = .array(array); updated = true
+            }
+            guard updated else { throw Error("子图代理控件不存在。") }
+            children[index] = .object(child)
+        }
+        return [:]
+    }
     static func identifier(_ value: JSONValue?) throws -> String {
         if let string = value?.stringValue, !string.isEmpty { return string }
         if let number = value?.integerValue { return String(number) }
@@ -458,7 +557,7 @@ private enum SubgraphExpansion {
         }
         return [id, source, slot, target, targetSlot, object["type"] ?? .string("*")]
     }
-    static func expand(_ graph: JSONValue) throws -> JSONValue {
+    static func expand(_ graph: JSONValue, objectInfo: [String: JSONValue]) throws -> JSONValue {
         guard var root = graph.objectValue, var nodes = root["nodes"]?.arrayValue,
               let rawLinks = root["links"]?.arrayValue else { return graph }
         var edges = try rawLinks.map(edge)
@@ -481,16 +580,8 @@ private enum SubgraphExpansion {
             let definition = definitions[type]!
             var path = ancestry[id] ?? []
             guard path.count < 32, path.insert(type).inserted else { throw Error("子图存在循环引用或嵌套过深。") }
-            guard let childNodes = definition["nodes"]?.arrayValue,
+            guard var childNodes = definition["nodes"]?.arrayValue,
                   let childRawLinks = definition["links"]?.arrayValue else { throw Error("子图缺少节点或连线定义。") }
-            // Promoted widgets need an explicit proxy mapping. Never silently
-            // discard instance-level overrides or guess extension widget order.
-            let promoted = definition["widgets"]?.arrayValue ?? []
-            let positional = instance["widgets_values"]?.arrayValue ?? []
-            let named = instance["widgets_values_named"]?.objectValue ?? instance["widgets_values"]?.objectValue ?? [:]
-            guard promoted.isEmpty, positional.isEmpty, named.isEmpty else {
-                throw Error("子图 \(id) 含提升到外层的控件，尚不能可靠映射；请从 ComfyUI 导出 API 工作流。")
-            }
             let outerInputs = instance["inputs"]?.arrayValue ?? []
             let outerOutputs = instance["outputs"]?.arrayValue ?? []
             let inputs = definition["inputs"]?.arrayValue ?? []
@@ -501,6 +592,7 @@ private enum SubgraphExpansion {
             for (outer, inner) in zip(outerInputs + outerOutputs, inputs + outputs) {
                 guard outer["type"] == inner["type"] else { throw Error("子图 \(id) 的端口类型与实例不一致。") }
             }
+            let boundaryValues = try promotedValues(instance: instance, definition: definition, children: &childNodes, objectInfo: objectInfo)
             let inputID = try identifier(definition["inputNode"]?["id"])
             let outputID = try identifier(definition["outputNode"]?["id"])
             let childIDs = try childNodes.map { try identifier($0["id"]) }
@@ -565,11 +657,15 @@ private enum SubgraphExpansion {
             for (isInput, ports, connected) in [(true, inputs, incoming), (false, outputs, outgoing)] {
                 for (slot, port) in ports.enumerated() {
                     let socketType = port["type"] ?? .string("*")
-                    expandedNodes.append(.object([
+                    var boundaryNode: [String: JSONValue] = [
                         "id": .string(boundary(isInput, slot)), "type": .string("Reroute"),
                         "inputs": .array([.object(["name": .string("value"), "type": socketType, "link": connected[slot] ?? .null])]),
                         "outputs": .array([.object(["name": .string("value"), "type": socketType])])
-                    ]))
+                    ]
+                    if isInput, connected[slot] == nil, let value = boundaryValues[slot] {
+                        boundaryNode["type"] = .string("__WorkbenchBoundaryValue"); boundaryNode["__boundary_value"] = value
+                    }
+                    expandedNodes.append(.object(boundaryNode))
                 }
             }
             nodes.remove(at: instanceIndex); nodes.append(contentsOf: expandedNodes); edges.append(contentsOf: childEdges)

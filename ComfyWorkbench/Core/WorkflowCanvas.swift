@@ -32,6 +32,7 @@ public struct WorkflowCanvas {
     public private(set) var widgetOrder: [String: [String]]
     public let originalLayout: Bool
     private let info: ObjectInfo?
+    private var internalFields: [String: (key: String, name: String)] = [:]
     private static let decorations: Set<String> = ["Note", "MarkdownNote", "忽略多组孤海", "Label (rgthree)"]
 
     public init(data: Data, objectInfo: ObjectInfo? = nil, widgetOrder: [String: [String]] = [:]) throws {
@@ -44,13 +45,17 @@ public struct WorkflowCanvas {
             // JSON object iteration is unordered. Capture names before canonical serialization.
             var scanner = JSONKeyOrderScanner(data: normalized)
             let orders = scanner.scan()
-            for (index, node) in (root["nodes"]?.arrayValue ?? []).enumerated() {
-                guard let id = node["id"]?.displayValue, self.widgetOrder[id] == nil,
-                      let names = orders["nodes/\(index)/widgets_values_named"],
-                      let named = node["widgets_values_named"]?.objectValue,
-                      let array = node["widgets_values"]?.arrayValue,
-                      names.count == array.count, names.map({ named[$0] ?? .null }) == array else { continue }
-                self.widgetOrder[id] = names
+            let graphIndex = try WorkflowGraphIndex(root)
+            for (scopeIndex, scope) in graphIndex.order.enumerated() {
+                let prefix = scope.isEmpty ? "nodes" : "definitions/subgraphs/\(scopeIndex - 1)/nodes"
+                for (position, node) in (graphIndex.graphs[scope]?["nodes"]?.arrayValue ?? []).enumerated() {
+                    guard let id = node["id"]?.displayValue else { continue }
+                    let key = WorkflowGraphIndex.key(scope, id)
+                    guard self.widgetOrder[key] == nil, let names = orders["\(prefix)/\(position)/widgets_values_named"],
+                          let named = node["widgets_values_named"]?.objectValue, let array = node["widgets_values"]?.arrayValue,
+                          names.count == array.count, names.map({ named[$0] ?? .null }) == array else { continue }
+                    self.widgetOrder[key] = names
+                }
             }
             try loadUI()
         } else { try loadAPI() }
@@ -60,17 +65,20 @@ public struct WorkflowCanvas {
     public func exportData() throws -> Data {
         if !originalLayout { return try WorkflowDocument(data: data(), objectInfo: info).promptData(prettyPrinted: true) }
         // Retain the named-widget insertion order for round trips through ComfyUI.
-        func encode(_ value: JSONValue, nodeID: String? = nil, orderedNames: Bool = false) throws -> String {
+        let index = try WorkflowGraphIndex(root)
+        let needsGroups = index.entries.values.contains { WorkflowControlEngine.groupTypes.contains($0.raw["type"]?.stringValue ?? "") || $0.raw["type"]?.stringValue == WorkflowControlEngine.repeater }
+        func encode(_ value: JSONValue, nodeID: String? = nil, orderedNames: Bool = false, scope: String = "", isDefinition: Bool = false) throws -> String {
             if var object = value.objectValue {
-                let currentID = object["id"]?.displayValue ?? nodeID
+                let currentScope = isDefinition ? object["id"]?.displayValue ?? scope : scope
+                let currentID = object["type"] != nil ? object["id"].map { WorkflowGraphIndex.key(currentScope, $0.displayValue) } ?? nodeID : nodeID
                 if object["type"]?.stringValue != nil && object["id"] != nil { object.removeValue(forKey: "title") }
                 if let nodes = object["nodes"]?.arrayValue {
                     object["nodes"] = .array(nodes.filter { !Self.decorations.contains($0["type"]?.stringValue ?? "") })
                     // These groups are functional: the frontend controller selects them by title/color.
-                    if !nodes.contains(where: { WorkflowGroupSwitch.controllerTypes.contains($0["type"]?.stringValue ?? "") }) {
+                    if !needsGroups {
                         object.removeValue(forKey: "groups")
                     }
-                    let retained = Set((object["nodes"]?.arrayValue ?? []).compactMap { $0["id"]?.displayValue })
+                    let retained = Set((object["nodes"]?.arrayValue ?? []).compactMap { $0["id"]?.displayValue }).union([object["inputNode"]?["id"]?.displayValue, object["outputNode"]?["id"]?.displayValue].compactMap { $0 })
                     if let links = object["links"]?.arrayValue {
                         object["links"] = .array(links.filter {
                             if let a = $0.arrayValue, a.count >= 6 { return retained.contains(a[1].displayValue) && retained.contains(a[3].displayValue) }
@@ -82,11 +90,11 @@ public struct WorkflowCanvas {
                 let keys = preferred.filter { object[$0] != nil } + object.keys.filter { !preferred.contains($0) }.sorted()
                 let pairs = try keys.map { key -> String in
                     let name = String(data: try JSONValue.string(key).data(), encoding: .utf8)!
-                    return name + ":" + (try encode(object[key]!, nodeID: currentID, orderedNames: key == "widgets_values_named"))
+                    return name + ":" + (try encode(object[key]!, nodeID: currentID, orderedNames: key == "widgets_values_named", scope: currentScope, isDefinition: key == "subgraphs"))
                 }
                 return "{" + pairs.joined(separator: ",") + "}"
             }
-            if let array = value.arrayValue { return "[" + (try array.map { try encode($0) }).joined(separator: ",") + "]" }
+            if let array = value.arrayValue { return "[" + (try array.map { try encode($0, scope: scope, isDefinition: isDefinition) }).joined(separator: ",") + "]" }
             return String(data: try value.data(), encoding: .utf8)!
         }
         return Data(try encode(root).utf8)
@@ -96,39 +104,27 @@ public struct WorkflowCanvas {
         guard let control = groupSwitches.first(where: { $0.id == fieldID }), !control.nodeIDs.isEmpty else {
             throw WorkflowError.invalid("这个分组没有可切换的节点，请重新导入带分组的画布 JSON。")
         }
-        let siblings = groupSwitches.filter { $0.controllerID == control.controllerID }
+        let siblings = groupSwitches.filter { $0.controllerID == control.controllerID && $0.ownerID == control.ownerID }
         var target = enabled
         if !target && control.restriction == "always one" && !siblings.contains(where: { $0.id != control.id && $0.enabled }) { target = true }
-        var changes: [String: JSONValue] = [:]
+        let index = try WorkflowGraphIndex(root)
+        var changes: [String: Int64] = [:]
         if target && ["max one", "always one"].contains(control.restriction) {
-            for sibling in siblings { for id in sibling.nodeIDs { changes[id] = .integer(sibling.offMode) } }
+            for sibling in siblings { for id in try index.descendants(of: sibling.nodeIDs) { changes[id] = sibling.offMode } }
         }
-        for id in control.nodeIDs { changes[id] = .integer(target ? 0 : control.offMode) }
-        let raw = root["nodes"]?.arrayValue ?? []
-        let before = Dictionary(uniqueKeysWithValues: raw.compactMap { node -> (String, JSONValue)? in
-            guard let id = node["id"]?.displayValue, changes[id] != nil else { return nil }
-            return (id, node["mode"] ?? .null)
-        })
-        guard before.values.allSatisfy({ $0 == .null || [Int64(0), 2, 4].contains($0.integerValue ?? -1) }) else {
-            throw WorkflowError.invalid("分组内有不支持的运行模式，无法保证撤销恢复。")
-        }
-        return (.object(before), .object(changes))
+        for id in try index.descendants(of: control.nodeIDs) { changes[id] = target ? 0 : control.offMode }
+        return try WorkflowControlEngine.change(index: index, requested: changes)
+    }
+    public func nodeModeChange(nodeID: String, mode: Int64) throws -> (before: JSONValue, after: JSONValue) {
+        guard originalLayout, nodes.contains(where: { $0.id == nodeID }), [Int64(0), 2, 4].contains(mode) else { throw WorkflowError.invalid("节点运行模式不可编辑。") }
+        let index = try WorkflowGraphIndex(root)
+        let targets = try index.descendants(of: [nodeID])
+        return try WorkflowControlEngine.change(index: index, requested: Dictionary(uniqueKeysWithValues: targets.map { ($0, mode) }))
     }
     public mutating func restoreGroupModes(_ snapshot: JSONValue) throws {
-        guard originalLayout, let modes = snapshot.objectValue, !modes.isEmpty,
-              var object = root.objectValue, var rawNodes = object["nodes"]?.arrayValue else { throw WorkflowError.invalid("分组切换记录不完整。") }
-        let ids = Set(rawNodes.compactMap { $0["id"]?.displayValue })
-        guard Set(modes.keys).isSubset(of: ids), modes.values.allSatisfy({ $0 == .null || [Int64(0), 2, 4].contains($0.integerValue ?? -1) }) else {
-            throw WorkflowError.invalid("分组节点或运行模式已变化，无法应用此记录。")
-        }
-        for index in rawNodes.indices {
-            guard var node = rawNodes[index].objectValue, let id = node["id"]?.displayValue, let mode = modes[id] else { continue }
-            if mode == .null { node.removeValue(forKey: "mode") } else { node["mode"] = mode }
-            rawNodes[index] = .object(node)
-        }
-        object["nodes"] = .array(rawNodes)
+        guard originalLayout, let modes = snapshot.objectValue else { throw WorkflowError.invalid("开关记录不完整。") }
         let previous = root
-        do { root = .object(object); try loadUI() }
+        do { root = try WorkflowGraphIndex(root).applyingModes(modes); try loadUI() }
         catch { root = previous; try? loadUI(); throw error }
     }
     public func referenceMode(nodeID: String) -> JSONValue? {
@@ -167,48 +163,57 @@ public struct WorkflowCanvas {
             return
         }
         // Reuse the API editor's exact type/range validation, including UInt64 seeds.
-        let validationJSON = JSONValue.object([field.nodeID: .object(["class_type": .string(field.nodeType), "inputs": .object([field.name: field.value])])])
+        let reference = internalFields[fieldID]
+        let targetKey = reference?.key ?? field.nodeID
+        let inputName = reference?.name ?? field.name
+        let validationJSON = JSONValue.object([field.nodeID: .object(["class_type": .string(field.nodeType), "inputs": .object([inputName: field.value])])])
         var validation = try WorkflowDocument(data: validationJSON.data(), objectInfo: info)
-        try validation.update(fieldID: field.id, value: value)
+        try validation.update(fieldID: field.nodeID + "." + inputName, value: value)
         if !originalLayout {
             var doc = try WorkflowDocument(data: data(), objectInfo: info)
             try doc.update(fieldID: fieldID, value: value)
             root = doc.json; try loadAPI(); return
         }
-        guard var object = root.objectValue, var rawNodes = object["nodes"]?.arrayValue,
-              let index = rawNodes.firstIndex(where: { $0["id"]?.displayValue == field.nodeID }),
-              var raw = rawNodes[index].objectValue else { throw WorkflowError.invalid("节点不存在。") }
-        if var named = raw["widgets_values_named"]?.objectValue, named[field.name] != nil {
+        let graphIndex = try WorkflowGraphIndex(root)
+        guard var raw = graphIndex.entries[targetKey]?.raw.objectValue else { throw WorkflowError.invalid("节点不存在。") }
+        if var named = raw["widgets_values_named"]?.objectValue, named[inputName] != nil {
             if var array = raw["widgets_values"]?.arrayValue {
-                guard let names = widgetOrder[field.nodeID], let slot = names.firstIndex(of: field.name),
-                      slot < array.count, array[slot] == named[field.name] else {
+                guard let names = widgetOrder[targetKey], let slot = names.firstIndex(of: inputName),
+                      slot < array.count, array[slot] == named[inputName] else {
                     throw WorkflowError.invalid("此节点的命名参数与位置参数无法可靠对应，请在 ComfyUI 中重新保存工作流后导入，或导入 API JSON。")
                 }
                 array[slot] = value; raw["widgets_values"] = .array(array)
-            } else if var mirror = raw["widgets_values"]?.objectValue, mirror[field.name] != nil {
-                mirror[field.name] = value; raw["widgets_values"] = .object(mirror)
+            } else if var mirror = raw["widgets_values"]?.objectValue, mirror[inputName] != nil {
+                mirror[inputName] = value; raw["widgets_values"] = .object(mirror)
             }
-            named[field.name] = value; raw["widgets_values_named"] = .object(named)
+            named[inputName] = value; raw["widgets_values_named"] = .object(named)
         } else if var named = raw["widgets_values"]?.objectValue {
-            named[field.name] = value; raw["widgets_values"] = .object(named)
+            named[inputName] = value; raw["widgets_values"] = .object(named)
         } else if var array = raw["widgets_values"]?.arrayValue,
-                  let slot = namesFor(raw, count: array.count).firstIndex(of: field.name), slot < array.count {
+                  let slot = namesFor(raw, count: array.count).firstIndex(of: inputName), slot < array.count {
             array[slot] = value; raw["widgets_values"] = .array(array)
         } else { throw WorkflowError.invalid("无法定位这个参数；节点连接保持原样。") }
-        rawNodes[index] = .object(raw); object["nodes"] = .array(rawNodes)
-        root = .object(object); try loadUI()
+        let previous = root
+        do { root = try graphIndex.replacingNodes([targetKey: .object(raw)]); try loadUI() }
+        catch { root = previous; try? loadUI(); throw error }
     }
 
     private mutating func loadUI() throws {
         guard let rawNodes = root["nodes"]?.arrayValue, !rawNodes.isEmpty, rawNodes.count <= 3000 else { throw WorkflowError.invalid("画布需包含 1–3000 个节点。") }
         var seen = Set<String>()
         var result: [CanvasNode] = []
-        groupSwitches = []; groupSwitchIssues = [:]
-        for node in rawNodes where WorkflowGroupSwitch.controllerTypes.contains(node["type"]?.stringValue ?? "") {
-            guard let id = node["id"]?.displayValue else { continue }
-            do { groupSwitches += try WorkflowGroupSwitch.controls(root: root, controller: node) }
-            catch { groupSwitchIssues[id] = error.localizedDescription }
+        let graphIndex = try WorkflowGraphIndex(root)
+        var overridden = Set<String>()
+        for (key, entry) in graphIndex.entries {
+            guard let scope = graphIndex.childScope(key), let proxies = entry.raw["properties"]?["proxyWidgets"]?.arrayValue,
+                  proxies.count == entry.raw["widgets_values"]?.arrayValue?.count else { continue }
+            for proxy in proxies {
+                guard let pair = proxy.arrayValue, pair.count == 2, pair[0].displayValue != "-1", let name = pair[1].stringValue else { continue }
+                overridden.insert(WorkflowGraphIndex.key(scope, pair[0].displayValue) + "." + name)
+            }
         }
+        let discovered = WorkflowControlEngine.discover(graphIndex)
+        groupSwitches = discovered.controls; groupSwitchIssues = discovered.issues; internalFields = [:]
         for (index, value) in rawNodes.enumerated() {
             guard let raw = value.objectValue, let id = raw["id"]?.displayValue, !id.isEmpty,
                   let type = raw["type"]?.stringValue, !type.isEmpty, seen.insert(id).inserted else { throw WorkflowError.invalid("画布存在缺失或重复的节点编号。") }
@@ -237,6 +242,13 @@ public struct WorkflowCanvas {
                     return WorkflowField(nodeID: id, nodeType: type, name: name, value: v, schema: info?.schema(for: type, input: name) ?? .inferred(name: name, value: v))
                 }
             }
+            for index in fields.indices where fields[index].name.hasPrefix("__proxy_") {
+                for proxy in raw["properties"]?["proxyWidgets"]?.arrayValue ?? [] {
+                    guard let pair = proxy.arrayValue, pair.count == 2, let name = pair[1].stringValue,
+                          fields[index].name == "__proxy_" + WorkflowGraphIndex.token([pair[0].displayValue, name]) else { continue }
+                    fields[index].displayName = "\(name) · 节点 #\(pair[0].displayValue)"
+                }
+            }
             let connected = Set((raw["inputs"]?.arrayValue ?? []).compactMap { input -> String? in
                 guard let link = input["link"], link != .null else { return nil }
                 return input["name"]?.stringValue
@@ -247,12 +259,34 @@ public struct WorkflowCanvas {
                 let buttons: Set<String> = ["🎲 Randomize Each Time", "🎲 New Fixed Random", "USE_LAST_SEED"]
                 fields.removeAll { buttons.contains($0.name) && info?.schema(for: type, input: $0.name) == nil }
             }
-            if WorkflowGroupSwitch.controllerTypes.contains(type) {
-                fields = groupSwitches.filter { $0.controllerID == id }.map { control in
-                    var field = WorkflowField(nodeID: id, nodeType: type, name: control.fieldName, value: .bool(control.enabled), schema: .init(kind: .boolean))
-                    field.displayName = control.title
-                    return field
-                }
+            if WorkflowControlEngine.frontendTypes.contains(type) { fields = [] }
+            for control in groupSwitches where control.ownerID == id {
+                var field = WorkflowField(nodeID: id, nodeType: type, name: control.fieldName, value: .bool(control.enabled), schema: .init(kind: .boolean))
+                field.displayName = control.title; fields.append(field)
+            }
+            if graphIndex.childScope(id) != nil {
+                do {
+                    for key in try graphIndex.descendants(of: [id]) where key != id {
+                        guard let entry = graphIndex.entries[key], let innerType = entry.raw["type"]?.stringValue,
+                              WorkflowWidgetLayout.switchLayouts[innerType] != nil || graphIndex.childScope(key) != nil else { continue }
+                        let named = entry.raw["widgets_values_named"]?.objectValue ?? entry.raw["widgets_values"]?.objectValue
+                        let values = entry.raw["widgets_values"]?.arrayValue ?? []
+                        let names = named?.keys.sorted() ?? (graphIndex.childScope(key) != nil ? WorkflowWidgetLayout.subgraphNames(entry.raw, count: values.count) : WorkflowWidgetLayout.names(raw: entry.raw, definition: info?.definitions[innerType], count: values.count)) ?? []
+                        let linked = Set((entry.raw["inputs"]?.arrayValue ?? []).filter { $0["link"] != nil && $0["link"] != .null }.compactMap { $0["name"]?.stringValue })
+                        for (slot, name) in names.enumerated() where !linked.contains(name) {
+                            if overridden.contains(key + "." + name) {
+                                groupSwitchIssues[id] = "部分内部控件由子图实例覆盖，请编辑外层对应控件。"
+                                continue
+                            }
+                            guard let value = named?[name] ?? (slot < values.count ? values[slot] : nil), value.isScalar else { continue }
+                            let fieldName = "__internal_" + WorkflowGraphIndex.token([key, name])
+                            var field = WorkflowField(nodeID: id, nodeType: innerType, name: fieldName, value: value,
+                                                      schema: info?.schema(for: innerType, input: name) ?? .inferred(name: name, value: value))
+                            field.displayName = "\(innerType) #\(entry.id) · \(name)"
+                            fields.append(field); internalFields[field.id] = (key, name)
+                        }
+                    }
+                } catch { groupSwitchIssues[id] = error.localizedDescription }
             }
             result.append(CanvasNode(id: id, type: type, x: position.0, y: position.1, width: size.0,
                                      height: raw["flags"]?["collapsed"]?.boolValue == true ? 34 : size.1,
@@ -327,6 +361,8 @@ public struct WorkflowCanvas {
 
     private func namesFor(_ raw: [String: JSONValue], count: Int) -> [String] {
         let type = raw["type"]?.stringValue ?? ""
+        if (root["definitions"]?["subgraphs"]?.arrayValue ?? []).contains(where: { $0["id"]?.stringValue == type }),
+           let names = WorkflowWidgetLayout.subgraphNames(.object(raw), count: count) { return names }
         let names: [String: [String]] = [
             "KSampler": ["seed", "control_after_generate", "steps", "cfg", "sampler_name", "scheduler", "denoise"],
             "KSamplerAdvanced": ["add_noise", "noise_seed", "control_after_generate", "steps", "cfg", "sampler_name", "scheduler", "start_at_step", "end_at_step", "return_with_leftover_noise"],
@@ -336,131 +372,8 @@ public struct WorkflowCanvas {
             "LoraLoaderModelOnly": ["lora_name", "strength_model"], "SaveImage": ["filename_prefix"], "SetNode": ["Constant"], "GetNode": ["Constant"]
         ]
         if let known = names[type], known.count == count || (type == "LoadImage" && count == 1) { return Array(known.prefix(count)) }
+        if let mapped = WorkflowWidgetLayout.names(raw: .object(raw), definition: info?.definitions[type], count: count) { return mapped }
         return (0..<count).map { "参数 \($0 + 1)" }
-    }
-}
-
-/// Frontend group controls change node modes, never API widget values.
-public struct WorkflowGroupSwitch: Identifiable, Equatable {
-    public static let controllerTypes: Set<String> = ["Fast Groups Bypasser (rgthree)", "Fast Groups Muter (rgthree)"]
-    public let controllerID: String
-    public let fieldName: String
-    public let title: String
-    public let color: String?
-    public let nodeIDs: [String]
-    public let activeCount: Int
-    public let offMode: Int64
-    public let restriction: String
-    public var id: String { controllerID + "." + fieldName }
-    // rgthree uses any active member to display an enabled group.
-    public var enabled: Bool { activeCount > 0 }
-    public var partiallyEnabled: Bool { activeCount > 0 && activeCount < nodeIDs.count }
-    public var status: String {
-        if nodeIDs.isEmpty { return "分组内没有节点" }
-        if partiallyEnabled { return "部分启用（\(activeCount)/\(nodeIDs.count)）" }
-        return enabled ? "已启用 · \(nodeIDs.count) 个节点" : (offMode == 4 ? "已旁路" : "已停用") + " · \(nodeIDs.count) 个节点"
-    }
-
-    fileprivate static func controls(root: JSONValue, controller: JSONValue) throws -> [WorkflowGroupSwitch] {
-        guard let controllerID = controller["id"]?.displayValue else { return [] }
-        let properties = controller["properties"]
-        let restriction = properties?["toggleRestriction"]?.stringValue ?? "default"
-        guard ["default", "max one", "always one"].contains(restriction) else { throw WorkflowError.invalid("此分组开关的限制规则尚不支持，请在 ComfyUI 中设置。") }
-        let subgraphs = root["definitions"]?["subgraphs"]?.arrayValue ?? []
-        if properties?["showAllGraphs"]?.boolValue != false && subgraphs.contains(where: { !($0["groups"]?.arrayValue ?? []).isEmpty }) {
-            throw WorkflowError.invalid("此开关包含子图分组，目前请在 ComfyUI 中切换后重新导入；手机不会猜测子图归属。")
-        }
-        let rawGroups = root["groups"]?.arrayValue ?? []
-        guard !rawGroups.isEmpty else { throw WorkflowError.invalid("缺少分组信息。请从 ComfyUI 重新导入画布 JSON，API JSON 不含分组开关。") }
-        guard rawGroups.count <= 1000 else { throw WorkflowError.invalid("分组数量超出手机支持范围。") }
-        let pattern = (properties?["matchTitle"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard pattern.count <= 256 else { throw WorkflowError.invalid("分组名称匹配规则过长，请简化后重新导入。") }
-        let regex: NSRegularExpression?
-        do { regex = pattern.isEmpty ? nil : try NSRegularExpression(pattern: pattern, options: .caseInsensitive) }
-        catch { throw WorkflowError.invalid("分组名称匹配规则无效，请在 ComfyUI 中修正。") }
-        let requestedColors = (properties?["matchColors"]?.stringValue ?? "").split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        let colors = try requestedColors.map { value -> String in
-            guard let hex = normalizedColor(value) else { throw WorkflowError.invalid("分组颜色筛选请使用十六进制颜色（如 #aabbcc）；当前规则无法可靠匹配。") }
-            return hex
-        }
-        let nodes = root["nodes"]?.arrayValue ?? []
-        let subgraphIDs = Set(subgraphs.compactMap { $0["id"]?.displayValue })
-        var groups: [(index: Int, x: Double, y: Double, control: WorkflowGroupSwitch)] = []
-        var identifiers = Set<String>()
-        for (index, group) in rawGroups.enumerated() {
-            let title = group["title"]?.stringValue ?? "分组"
-            if let regex = regex, regex.firstMatch(in: title, range: NSRange(title.startIndex..., in: title)) == nil { continue }
-            let color = normalizedColor(group["color"]?.stringValue ?? "")
-            if !colors.isEmpty && !colors.contains(color ?? "") { continue }
-            guard let bounds = group["bounding"]?.arrayValue, bounds.count == 4,
-                  let x = bounds[0].doubleValue, let y = bounds[1].doubleValue,
-                  let w = bounds[2].doubleValue, let h = bounds[3].doubleValue,
-                  [x, y, w, h].allSatisfy({ $0.isFinite && abs($0) <= 100_000_000 }), w > 0, h > 0 else {
-                throw WorkflowError.invalid("分组范围缺失或无效，请在 ComfyUI 中重新保存画布。")
-            }
-            let key = group["id"].map { "id_" + $0.displayValue } ?? "index_\(index)"
-            guard identifiers.insert(key).inserted else { throw WorkflowError.invalid("分组编号重复，无法可靠切换。") }
-            var members: [JSONValue] = []
-            for node in nodes {
-                guard let position = pair(node["pos"]), let size = pair(node["size"]), size.0 > 0, size.1 > 0 else {
-                    throw WorkflowError.invalid("部分节点缺少原始位置或尺寸，请在 ComfyUI 中保存后重新导入。")
-                }
-                var cx = position.0 + size.0 / 2
-                var cy = position.1 + size.1 / 2 - (node["type"]?.stringValue == "Reroute" ? 0 : 15)
-                if node["flags"]?["collapsed"]?.boolValue == true {
-                    cy = position.1 - 15
-                    // Browser font metrics are not available. Accept only unambiguous membership
-                    // across the full range of possible collapsed-title widths.
-                    let low = position.0 + min(size.0, 60) / 2, high = cx
-                    if cy >= y && cy < y + h && high >= x && low < x + w {
-                        guard low >= x && high < x + w else { throw WorkflowError.invalid("分组边缘有折叠节点，归属不明确。请展开该节点并保存后重新导入。") }
-                    }
-                    cx = low
-                }
-                if cx >= x && cx < x + w && cy >= y && cy < y + h {
-                    if subgraphIDs.contains(node["type"]?.stringValue ?? "") || node["subgraph"] != nil {
-                        throw WorkflowError.invalid("此分组包含子图，目前请在 ComfyUI 中切换后重新导入。")
-                    }
-                    members.append(node)
-                }
-            }
-            let control = WorkflowGroupSwitch(controllerID: controllerID, fieldName: "__group_" + key, title: title, color: color,
-                nodeIDs: members.compactMap { $0["id"]?.displayValue }, activeCount: members.filter { ($0["mode"]?.integerValue ?? 0) == 0 }.count,
-                offMode: controller["type"]?.stringValue == "Fast Groups Muter (rgthree)" ? 2 : 4, restriction: restriction)
-            groups.append((index, x, y, control))
-        }
-        let sort = properties?["sort"]?.stringValue ?? "position"
-        let alphabetText = (properties?["customSortAlphabet"]?.stringValue ?? "").replacingOccurrences(of: "\n", with: "").lowercased()
-        let alphabet = alphabetText.contains(",") ? alphabetText.components(separatedBy: ",") : alphabetText.trimmingCharacters(in: .whitespacesAndNewlines).map(String.init)
-        groups.sort { a, b in
-            if sort == "position" {
-                if floor(a.y / 30) != floor(b.y / 30) { return floor(a.y / 30) < floor(b.y / 30) }
-                if floor(a.x / 30) != floor(b.x / 30) { return floor(a.x / 30) < floor(b.x / 30) }
-            } else {
-                if sort == "custom alphabet", !alphabet.isEmpty {
-                    let ai = alphabet.firstIndex { a.control.title.lowercased().hasPrefix($0) } ?? Int.max
-                    let bi = alphabet.firstIndex { b.control.title.lowercased().hasPrefix($0) } ?? Int.max
-                    if ai != bi { return ai < bi }
-                }
-                let order = a.control.title.localizedStandardCompare(b.control.title)
-                if order != .orderedSame { return order == .orderedAscending }
-            }
-            return a.index < b.index
-        }
-        return groups.map(\.control)
-    }
-    private static func pair(_ value: JSONValue?) -> (Double, Double)? {
-        let a = value?.arrayValue
-        let x = a.flatMap { $0.count >= 2 ? $0[0].doubleValue : nil } ?? value?["0"]?.doubleValue
-        let y = a.flatMap { $0.count >= 2 ? $0[1].doubleValue : nil } ?? value?["1"]?.doubleValue
-        guard let x = x, let y = y, x.isFinite, y.isFinite else { return nil }; return (x, y)
-    }
-    private static func normalizedColor(_ color: String) -> String? {
-        var hex = color.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if hex.hasPrefix("#") { hex.removeFirst() }
-        if hex.count == 3 { hex = hex.map { String(repeating: String($0), count: 2) }.joined() }
-        guard hex.count == 6, hex.allSatisfy({ $0.isHexDigit }) else { return nil }
-        return "#" + hex
     }
 }
 

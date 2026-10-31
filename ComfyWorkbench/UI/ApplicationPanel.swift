@@ -221,6 +221,7 @@ struct WorkflowGroupSwitchRow: View {
                 Circle().fill(dotColor).frame(width: 7, height: 7).padding(.top, 6)
                 VStack(alignment: .leading, spacing: 6) {
                     Text(title ?? field.title).font(.system(size: 15, weight: .medium)).fixedSize(horizontal: false, vertical: true)
+                    if let scope = control?.scopeCaption { Text(scope).font(.caption2).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true) }
                     Text(control?.status ?? "分组不可用").font(.caption).foregroundColor(.secondary)
                 }
             }

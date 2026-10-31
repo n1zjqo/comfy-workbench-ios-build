@@ -8,6 +8,26 @@ import CryptoKit
 @testable import ComfyWorkbench
 
 final class NativeExperienceTests: XCTestCase {
+    @MainActor func testNestedControlsStayPinnedAfterRestartAndUndo() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let data = Data(##"{"nodes":[{"id":150,"type":"sub","pos":[0,0],"size":[200,100]}],"links":[],"definitions":{"subgraphs":[{"id":"sub","nodes":[{"id":501,"type":"Text","pos":[20,40],"size":[100,80],"widgets_values":["example"]},{"id":502,"type":"Fast Groups Muter (rgthree)","pos":[500,0],"size":[200,100],"properties":{"showAllGraphs":false}}],"links":[],"groups":[{"id":8,"title":"Detail","bounding":[0,0,200,200],"color":"#88a"}]}]}}"##.utf8)
+        let store = WorkbenchStore(storageURL: folder)
+        let workflow = SavedWorkflow(name: "Synthetic nested controls", data: data)
+        store.workflows = [workflow]; store.select(workflow.id)
+        try store.showNodeInPanel("150", enabled: true)
+        let field = try XCTUnwrap(store.canvas?.fields.first)
+        XCTAssertEqual(store.panelItems.map(\.id), [field.id])
+        try store.edit(field, text: "false")
+        let restored = WorkbenchStore(storageURL: folder)
+        XCTAssertEqual(restored.panelItems.map(\.id), [field.id])
+        XCTAssertFalse(try XCTUnwrap(restored.canvas?.groupSwitches.first).enabled)
+        restored.undoEdit(); XCTAssertEqual(restored.canvas?.root, try JSONValue(data: data))
+        restored.redoEdit(); XCTAssertFalse(try XCTUnwrap(restored.canvas?.groupSwitches.first).enabled)
+        let window = try host(ApplicationPanel { _ in }.environmentObject(restored).padding(20).background(Palette.workspace).preferredColorScheme(.dark))
+        defer { window.isHidden = true }
+        try capturePreview(window, name: "generic-nested-controls")
+    }
     @MainActor func testGroupPanelSwitchPersistsAndUndoRestoresMixedModes() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
